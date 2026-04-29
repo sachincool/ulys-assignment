@@ -1,0 +1,14 @@
+name: ulys-dev
+runtime:
+  name: nodejs
+  options:
+    typescript: true
+backend:
+  # Set after `bootstrap` stack runs:
+  #   pulumi stack init dev --secrets-provider="gcpkms://projects/<proj>/locations/us-central1/keyRings/pulumi-state-dev/cryptoKeys/state"
+  url: gs://ulys-dev-pulumi-state
+config:
+  gcp:project:
+    description: dev GCP project
+  gcp:region:
+    default: us-central1

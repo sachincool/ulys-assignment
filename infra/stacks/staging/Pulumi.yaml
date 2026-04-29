@@ -1,0 +1,16 @@
+name: ulys-staging
+runtime:
+  name: nodejs
+  options:
+    typescript: true
+backend:
+  url: gs://ulys-staging-pulumi-state
+config:
+  gcp:project:
+    description: staging GCP project ID
+  gcp:region:
+    default: us-central1
+  ulys-staging:ciRunnerCidr:
+    secret: true
+  ulys-staging:cosignPubKeyPem:
+    secret: true

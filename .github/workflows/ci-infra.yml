@@ -1,0 +1,70 @@
+name: ci-infra
+
+on:
+  pull_request:
+    paths: ["infra/**", ".github/workflows/ci-infra.yml"]
+  push:
+    branches: [main]
+    paths: ["infra/**"]
+
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: write
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        env: [dev, staging, prod]
+    environment: ${{ matrix.env }}-preview
+    defaults: { run: { working-directory: infra } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: pnpm, cache-dependency-path: infra/pnpm-lock.yaml }
+      - uses: pnpm/action-setup@v3
+        with: { version: 9 }
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm tsc -p tsconfig.json --noEmit
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars[format('WIF_PROVIDER_{0}', matrix.env)] }}
+          service_account: ${{ vars[format('DEPLOYER_SA_{0}', matrix.env)] }}
+      - uses: pulumi/actions@v5
+        with:
+          command: preview
+          stack-name: sachincool/${{ matrix.env }}
+          work-dir: infra/stacks/${{ matrix.env }}
+          comment-on-pr: true
+
+  apply:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    strategy:
+      max-parallel: 1
+      matrix:
+        env: [dev, staging, prod]
+    environment: ${{ matrix.env }}        # GH Environment with prod approver
+    defaults: { run: { working-directory: infra } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: pnpm, cache-dependency-path: infra/pnpm-lock.yaml }
+      - uses: pnpm/action-setup@v3
+        with: { version: 9 }
+      - run: pnpm install --frozen-lockfile
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars[format('WIF_PROVIDER_{0}', matrix.env)] }}
+          service_account: ${{ vars[format('DEPLOYER_SA_{0}', matrix.env)] }}
+      - uses: pulumi/actions@v5
+        with:
+          command: up
+          stack-name: sachincool/${{ matrix.env }}
+          work-dir: infra/stacks/${{ matrix.env }}

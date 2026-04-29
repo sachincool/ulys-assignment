@@ -1,0 +1,144 @@
+name: ci-app
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps/**"
+      - ".github/workflows/ci-app.yml"
+  pull_request:
+    paths: ["apps/**"]
+
+permissions:
+  contents: read
+  id-token: write           # WIF
+  packages: write           # GHCR fallback
+  pull-requests: write      # to open the manifest-bump PR
+
+env:
+  REGISTRY: us-central1-docker.pkg.dev
+  COSIGN_EXPERIMENTAL: "true"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [api, worker]
+    defaults:
+      run: { working-directory: apps/${{ matrix.service }} }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache-dependency-path: apps/${{ matrix.service }}/go.sum
+      - run: go vet ./...
+      - run: go test -race ./...
+      - uses: golangci/golangci-lint-action@v4
+        with:
+          version: v1.57
+          working-directory: apps/${{ matrix.service }}
+
+  build-and-sign:
+    needs: test
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [api, worker]
+    outputs:
+      api-digest: ${{ steps.dgst.outputs.api }}
+      worker-digest: ${{ steps.dgst.outputs.worker }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER_DEV }}
+          service_account: ${{ vars.DEPLOYER_SA_DEV }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+      - run: gcloud auth configure-docker ${{ env.REGISTRY }} --quiet
+
+      - uses: docker/setup-buildx-action@v3
+
+      - id: meta
+        run: |
+          SHA="${GITHUB_SHA::12}"
+          REPO_PATH="${{ vars.GCP_PROJECT_ID_DEV }}/ulys"
+          IMAGE="${{ env.REGISTRY }}/$REPO_PATH/${{ matrix.service }}:$SHA"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA"     >> "$GITHUB_OUTPUT"
+
+      - uses: docker/build-push-action@v5
+        id: build
+        with:
+          context: apps/${{ matrix.service }}
+          push: true
+          tags: ${{ steps.meta.outputs.image }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to:   type=gha,scope=${{ matrix.service }},mode=max
+          provenance: true
+          sbom: true
+
+      # SBOM + vuln scan as cosign attestations.
+      - uses: anchore/sbom-action@v0
+        with:
+          image: ${{ steps.meta.outputs.image }}@${{ steps.build.outputs.digest }}
+          format: spdx-json
+          output-file: ${{ matrix.service }}-sbom.spdx.json
+
+      - uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.meta.outputs.image }}@${{ steps.build.outputs.digest }}
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+
+      - uses: sigstore/cosign-installer@v3
+      - name: cosign sign + attest
+        run: |
+          IMG="${{ steps.meta.outputs.image }}@${{ steps.build.outputs.digest }}"
+          cosign sign --yes "$IMG"
+          cosign attest --yes --predicate ${{ matrix.service }}-sbom.spdx.json \
+            --type spdxjson "$IMG"
+
+      - id: dgst
+        run: echo "${{ matrix.service }}=${{ steps.build.outputs.digest }}" >> "$GITHUB_OUTPUT"
+
+  bump-manifest:
+    needs: build-and-sign
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout manifest repo
+        uses: actions/checkout@v4
+        with:
+          repository: sachincool/ulys-manifests
+          token: ${{ secrets.MANIFEST_REPO_PAT }}
+          path: manifests
+      - name: bump dev digests
+        working-directory: manifests/apps/dev
+        run: |
+          # Replace the api + worker digests in the kustomization.yaml.
+          # Production-grade tools: kustomize edit set image, or yq.
+          yq -i ".images[0].digest = \"${{ needs.build-and-sign.outputs.api-digest }}\"" kustomization.yaml
+          yq -i ".images[1].digest = \"${{ needs.build-and-sign.outputs.worker-digest }}\"" kustomization.yaml
+
+      - name: open PR
+        working-directory: manifests
+        env:
+          GH_TOKEN: ${{ secrets.MANIFEST_REPO_PAT }}
+        run: |
+          BR="bump-dev-${GITHUB_SHA::12}"
+          git config user.name  "ulys-ci"
+          git config user.email "ci@ulys.local"
+          git checkout -b "$BR"
+          git add apps/dev/kustomization.yaml
+          git commit -m "dev: bump api/worker to ${GITHUB_SHA::12}"
+          git push origin "$BR"
+          gh pr create \
+            --title "dev: bump api/worker to ${GITHUB_SHA::12}" \
+            --body  "Image digests signed by CI (cosign). Argo CD will reconcile after merge." \
+            --base  main --head "$BR" --label auto-merge

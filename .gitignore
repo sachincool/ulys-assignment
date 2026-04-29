@@ -1,0 +1,10 @@
+node_modules/
+.pulumi/
+pulumi-state/
+.vscode/
+.idea/
+.DS_Store
+*.local
+*.log
+out/
+bin/
