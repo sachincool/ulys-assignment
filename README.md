@@ -1,217 +1,207 @@
-# ulys (production rebuild)
+# ulys-assignment
 
-A production-shaped rebuild of the [ulys-assignment](https://github.com/sachincool/ulys-assignment)
-take-home. Same product surface (web → api → worker, with Postgres + Redis
-behind it) — different operational shape: **GKE Standard, Pulumi (TypeScript),
-GitOps with Argo CD + Flagger**, signed images, mesh-managed mTLS, structured
-observability.
-
-```
-                  ┌───────────────────────┐
-   client ───────▶│ External HTTPS LB     │
-                  │ + Cloud Armor + IAP   │   (north-south)
-                  └───────────────────────┘
-                            │
-                  ┌─────────▼──────────┐
-                  │  GKE Standard      │
-                  │  (zonal, private)  │
-                  │                    │
-                  │  ┌──────────────┐  │
-                  │  │ api          │──┼───▶ worker (mTLS via Linkerd,
-                  │  │ Deployment   │  │     ClusterIP, NetworkPolicy +
-                  │  └──────┬───────┘  │     Linkerd AuthorizationPolicy)
-                  │         │          │
-                  │  Cloud SQL Auth Proxy (CSI volume)
-                  │         │
-                  └─────────┼──────────┘
-                            │
-                  ┌─────────▼──────────┐
-                  │ Cloud SQL Postgres │ (private IP, IAM auth)
-                  │ Memorystore Redis  │ (private IP, AUTH+TLS in stg/prod)
-                  └────────────────────┘
-```
-
-## Why this is different from the take-home
-
-| | take-home (Cloud Run) | this |
-|---|---|---|
-| IaC | Terraform HCL | **Pulumi TypeScript** |
-| Compute | Cloud Run × 2 | **GKE Standard, zonal** |
-| Service-to-service auth | per-call Google ID tokens | **Linkerd mTLS + AuthorizationPolicy** |
-| Canary | gcloud `--tag=canary` + smoke curl | **Flagger** progressive delivery on Prometheus SLOs |
-| Deploy mechanism | runner does `gcloud run deploy` | **GitOps**: runner bumps a manifest digest; Argo CD reconciles |
-| DB password | Secret Manager mounted as env at TF time | **External Secrets Operator** + Cloud SQL IAM auth (no password on the wire) |
-| Image trust | unsigned tags | **cosign** keyless signing, **SBOM + Trivy** as cosign attestations |
-| Multi-env | one project | **3 GCP projects** with image-digest promotion |
-
-## Why GKE Standard (not Autopilot)
-
-Autopilot is correct for a multi-team platform; for a single-product team
-the constraints (no privileged DaemonSets in `kube-system`, ~30% pod-hour
-overhead, regional control plane only) cost more than they save. **Standard
-zonal** has a free control plane (one cluster per project) and the same
-best-practice features can be applied explicitly:
-
-- private cluster, private endpoint
-- Workload Identity (the only auth path for pods to GCP APIs)
-- NetworkPolicy enforcement (Calico)
-- Shielded nodes (secure boot + integrity monitoring)
-- Release channel: `REGULAR` (Google rolls minor upgrades)
-- Auto-repair + auto-upgrade on the node pool
-- Managed Prometheus on the cluster
-
-Defaults in `infra/components/gke.ts` give "minimum prod" — single zone,
-one e2-standard-2 node pool, autoscale 1..3. Multi-zone or multi-region
-upgrades are documented one-line changes (see "Scaling further" below);
-day-one is intentionally single-region single-zone.
-
-## Why Linkerd (not Istio)
-
-For one product team, Linkerd ships mTLS, retries, and traffic-splitting
-in a Rust micro-proxy (~20 MB pod overhead) with on-by-default policy.
-Istio's Envoy sidecar is ~150 MB and the YAML surface is a separate skill.
-The day Istio earns its keep is the day you have a real reason to care about
-JWT validation at the mesh, advanced AuthorizationPolicy, or VirtualService
-fan-out — none of that on day one.
-
-## Repo layout
+A small three-service system on **GCP**, built **production-ready**:
+**GKE Standard** (private, opinionated) provisioned with **Pulumi (TypeScript)**,
+deployed via **Argo CD GitOps** + **Argo Rollouts** progressive delivery,
+secrets via **External Secrets Operator** and Google Secret Manager.
 
 ```
-ulys-prod/                          # this repo (source + infra)
-├── apps/
-│   ├── api/        cmd/api, internal/{db,redis,server,telemetry}
-│   └── worker/     cmd/worker, internal/server
-├── infra/          Pulumi TypeScript
-│   ├── bootstrap/  one-shot per env: state bucket, WIF, deployer SA
-│   ├── components/ gke / postgres / memorystore / secrets / wi / binauthz
-│   └── stacks/     dev / staging / prod
-└── .github/workflows/
-    ├── ci-app.yml      build + scan + sign + manifest-bump PR
-    ├── ci-infra.yml    pulumi preview on PR; pulumi up on merge per env
-    └── promote.yml     manual: copy a signed digest from one env to the next
-
-ulys-manifests/                     # GitOps repo, separate
-├── argocd-applications/            # App-of-Apps root + per-env children
-├── platform/{base,dev,staging,prod}  # Linkerd, Flagger, ESO, OTel collector,
-│                                     # default-deny NetworkPolicy
-└── apps/{base,dev,staging,prod}      # api/worker Deployment + Service +
-                                       # Canary CR + ExternalSecret + NetworkPolicy
+                              ┌───────────────────────┐
+   client ───────────────────▶│ External HTTPS LB     │
+                              │ + Cloud Armor*        │   *production add-on
+                              └───────────┬───────────┘
+                                          │
+                              ┌───────────▼──────────┐
+                              │ GKE Standard zonal   │
+                              │ (private nodes)      │
+                              │                      │
+                              │ ┌──────────┐ ┌───────│
+                              │ │ api      │─│worker │   in-cluster, NetworkPolicy
+                              │ │ Rollout  │ │Roll'  │   gates worker ingress to
+                              │ └────┬─────┘ └───────│   pods labeled `app=api`
+                              │      │ Workload      │
+                              │      │ Identity      │
+                              └──────┼───────────────┘
+                                     │
+                              ┌──────▼─────────┐
+                              │ Cloud SQL      │ (private IP)
+                              │ Memorystore    │ (private IP)
+                              │ Secret Manager │ (via ESO)
+                              └────────────────┘
 ```
 
-## Setup (fresh GCP projects)
+App code total: ~200 lines.
 
-You need three GCP projects (`ulys-dev-…`, `ulys-staging-…`, `ulys-prod-…`),
-each linked to the same billing account, plus this repo + an empty
-`ulys-manifests` repo for GitOps.
+---
 
-### One-shot per env
+## Submission
 
-```bash
-cd infra/bootstrap
-pnpm install
-pulumi stack init dev-bootstrap
-pulumi config set gcp:project   ulys-dev-XXXXXX
-pulumi config set ulys-bootstrap:githubRepo sachincool/ulys
-pulumi up
-
-# Outputs go into the env stack's Pulumi.<env>.yaml backend config.
-pulumi stack output stateBucketName
-pulumi stack output wifProviderResource
-pulumi stack output deployerSaEmail
-```
-
-Repeat for staging-bootstrap and prod-bootstrap.
-
-### Per-env stack
-
-```bash
-cd infra/stacks/dev
-pulumi stack init dev
-pulumi config set gcp:project   ulys-dev-XXXXXX
-pulumi up                       # creates VPC, GKE, Cloud SQL, Memorystore,
-                                # Artifact Registry, IAM, secrets
-```
-
-Once `pulumi up` returns:
-
-```bash
-gcloud container clusters get-credentials ulys-gke \
-  --location=us-central1-a --project=ulys-dev-XXXXXX
-
-# Install Argo CD once per cluster:
-kubectl create namespace argocd
-kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
-
-# Point Argo CD at the manifests repo:
-kubectl apply -n argocd -f https://github.com/sachincool/ulys-manifests/raw/main/argocd-applications/root.yaml
-```
-
-That's the last imperative step. From then on, every change goes through a
-PR: app changes hit `ci-app.yml` → CI signs an image and opens a manifest
-PR → Argo CD reconciles after merge → Flagger does the canary.
-
-## Forcing function (canary rollback) — same demo, different mechanism
-
-Identical to the take-home in spirit: push a commit that intentionally
-breaks `/readyz`, observe the rollout abort. Mechanically very different:
-
-1. Push a commit to `apps/api/internal/server/handlers.go` that returns
-   503 unconditionally from `Readyz`.
-2. CI builds + signs the image, opens a manifest-bump PR for dev.
-3. Merge that PR. Argo CD reconciles the Deployment.
-4. Flagger detects the new `targetRef`, spins up the canary ReplicaSet,
-   shifts 10% traffic.
-5. Flagger queries Prometheus for the canary's `request-success-rate`
-   and `request-duration` over the last minute. Both come from the
-   Linkerd proxy metrics (the success rate immediately tanks).
-6. Threshold breach → Flagger aborts the rollout, scales down the canary
-   ReplicaSet, restores 100% to the stable. **Public traffic exposure to
-   the bad revision: ≤10%, ≤1 minute.**
-7. Push the revert commit. Same flow, smoke passes, Flagger promotes.
-
-The win over the take-home: no per-step shell, no smoke curls, no manual
-rollback step in the workflow. Real metrics-driven progressive delivery.
-
-## Scaling further (one-line upgrades)
-
-| upgrade | change |
+| | |
 |---|---|
-| Regional control plane (HA) | `location: zone` → `location: region` in `infra/stacks/<env>/index.ts`. ~$73/mo. |
-| Multi-zone nodes (zonal HA) | `nodeLocations: [a]` → `[a, b, c]`. Adds zonal redundancy; cost roughly 3× node count. |
-| Multi-region (active-active) | Stamp the stack a second time pointed at a different region. Add a multi-region NEG to the LB. Don't try to make one cluster span regions. |
-| Read replicas | Already in `infra/stacks/prod/index.ts`. dev/staging skip. |
-| Cloud Armor + IAP | Set on the BackendConfig in `apps/base/api/service.yaml`; needs an OAuth client ID per env. |
+| 🟢 First green canary deploy | [ci-app run](https://github.com/sachincool/ulys-prod/actions/runs/25154644140) — both images built + signed, manifest digest committed |
+| 🔴 Forcing-function rollback | [ci-app run](https://github.com/sachincool/ulys-prod/actions/runs/25157193906) (broken `/readyz`) — broken image built; Argo Rollouts canary RS could not become Ready, traffic stayed on the stable revision, eventually marked `Degraded` with `ProgressDeadlineExceeded`. **Public traffic exposure to the bad revision: zero.** |
+| ✅ Green re-deploy after revert | [ci-app run](https://github.com/sachincool/ulys-prod/actions/runs/25158353537) — fixed image built; Argo Rollouts canary smoke passes; promoted to 100% |
+| 📜 `pulumi destroy` output | [`docs/destroy.txt`](docs/destroy.txt) |
+| 🧾 Billing screenshot | [`docs/billing.png`](docs/billing.png) |
+| 🖼️ Visual walk-through | [`docs/SETUP_DOCS.md`](docs/SETUP_DOCS.md) |
+| 🌐 Live api (when up) | `http://136.115.83.214` — `/livez /healthz /readyz /version /work` |
 
-## Cost (idle, USD)
+---
 
-| env | rough monthly | what dominates |
-|---|---|---|
-| dev | $70-90 | Memorystore (~$35) + Cloud SQL f1-micro (~$15) + node (~$30 spot). Cluster control plane $0 (zonal). |
-| staging | $120-150 | + Cloud SQL HA tier (~$35), AUTH+TLS Memorystore (~$5 extra). |
-| prod | $250-300 | + regional control plane ($73), HA db-custom-2-7680 (~$90), STANDARD_HA Memorystore 5GB (~$70). |
+## Plug-and-play setup (one command per direction)
 
-`pulumi destroy` returns each env to $0. There's no "delete the project"
-plan B because each env's project is exactly its own scope — destroying
-the stack is sufficient.
+```bash
+# Pre-reqs (one-time): brew install pulumi pnpm gcloud kubectl helm gh
+# gcloud auth login && gcloud auth application-default login
 
-## What's still skipped (and why)
+# Spin up a fresh dev environment from a clean GCP account:
+make up \
+  ENV=dev \
+  PROJECT_ID=ulys-dev-XXXXX \
+  BILLING_ACCOUNT=01XXXX-XXXXXX-XXXXXX
 
-- **Multi-region.** Single region until SLO budget says otherwise.
-- **Service mesh ambient mode.** Sidecar Linkerd is mature; ambient is
-  fine but not yet the default.
-- **Custom auth (Dex / Keycloak).** Use Google IAP at the LB until there's
-  a multi-IdP requirement.
-- **Self-hosted Prometheus / Loki / Tempo.** Cloud Monitoring/Logging/Trace
-  is cheaper and lower-ops at our scale.
-- **Per-PR ephemeral environments.** vcluster makes this easy later; not
-  day-one.
-- **Crossplane.** Pulumi covers everything; Crossplane is for ≥3-team
-  self-service, which we don't have.
+# What this does:
+#   1. gcloud projects create + billing link + enable 17 APIs
+#   2. infra/bootstrap pulumi up: state bucket + WIF pool + curated deployer SA
+#   3. infra/stacks/dev pulumi up: VPC + GKE Standard + Cloud SQL + Memorystore
+#      + Artifact Registry + Secret Manager + IAM
+#   4. kubectl apply Argo CD root Application pointing at the manifests repo
+#   5. Wait for apps-dev to reach Healthy
 
-These all live as ADRs under `docs/adr/` so the choice is reviewable.
+# Tear it all back down:
+make down ENV=dev PROJECT_ID=ulys-dev-XXXXX
+```
 
-## ADRs
+After `make up` finishes, every subsequent change goes through GitOps:
+push to `main` → CI builds + signs → CI opens a manifest-bump PR →
+merge → Argo CD reconciles → Argo Rollouts does the canary.
 
-- [`docs/adr/0001-why-we-left-cloud-run.md`](docs/adr/0001-why-we-left-cloud-run.md) —
-  what nine bug-iterations on the take-home taught us about Cloud Run's
-  fit for this product.
+---
+
+## Architecture decisions
+
+- **GKE Standard, not Autopilot.** Free zonal control plane + the same best
+  practices applied explicitly (private cluster, Workload Identity,
+  NetworkPolicy enforcement via Calico, shielded nodes, release channel
+  REGULAR, auto-repair/upgrade). Autopilot is correct for multi-team
+  platforms; this is a one-team-one-product setup. Cost is roughly half.
+- **Single zonal cluster.** Cluster `location: us-central1-a`. Free control
+  plane, single zone for nodes. Multi-region is a 2-line upgrade
+  (`location: zone` → `location: region` and stamp the stack a second time
+  in another region).
+- **Argo Rollouts over Flagger.** Argo Rollouts is the sister project to
+  Argo CD, doesn't need a service mesh, has a UI, integrates natively
+  with the GitOps flow. AnalysisTemplate runs a Job (curl-based smoke)
+  that's exactly the take-home's `scripts/smoke.sh` translated to K8s native.
+- **Pulumi (TypeScript), not Terraform.** Real types catch typos at compile
+  time; real refactoring lets components stay DRY across `infra/stacks/{dev,
+  staging,prod}`. State lives in a GCS bucket per env; locking is built in.
+- **External Secrets Operator + Google Secret Manager.** App code reads
+  `DB_PASSWORD` as a regular env var; ESO syncs it from Secret Manager via
+  Workload Identity. Cleartext never lives in TF state, never on disk in
+  the repo.
+- **Workload Identity, no JSON keys.** GitHub Actions assumes the deployer
+  GSA via WIF (`attribute_condition` pins it to one repo + one GH
+  Environment). Runtime pods impersonate their own GSAs via KSA → GSA
+  binding. No service account JSON anywhere.
+- **NetworkPolicy** is shipped (worker ingress is restricted to pods
+  labeled `app=api`) — though the take-home variant relaxes the
+  default-deny that fought DNS resolution; production would re-enable it
+  with explicit DNS egress rules.
+- **`runAsNonRoot: true` + numeric `runAsUser: 65532`.** distroless's
+  `nonroot` user is named, not numeric, and PSA `restricted` rejects
+  named-user images. Pinning to the well-known UID 65532 satisfies the
+  policy.
+
+---
+
+## Estimated monthly cost (us-central1, idle, dev)
+
+| | $/mo |
+|---|---|
+| GKE Standard zonal control plane | $0 (first zonal cluster per project is free) |
+| 2× e2-standard-2 nodes (cluster autoscaler, spot) | ~$30 |
+| Cloud SQL `db-f1-micro` Postgres + 10 GiB SSD | ~$9 |
+| Memorystore Redis BASIC, 1 GiB | ~$35 |
+| Cloud NAT, LBs, Cloud Logging, egress | ~$8 |
+| **Total dev idle** | **~$80-90/mo** |
+
+Production-default (regional control plane + HA Cloud SQL + STANDARD_HA
+Memorystore + Cloud Armor) lands around $250-300/mo. `pulumi destroy`
+returns to $0.
+
+A `$300` Cloud Billing budget with 50/90/100% email alerts is in
+`infra/stacks/prod/index.ts` (commented-out for dev).
+
+---
+
+## Adding a second environment
+
+3 GCP projects, same Pulumi stack pattern, image-digest promotion:
+
+```
+infra/stacks/{dev,staging,prod}/index.ts   # one stack file per env
+manifests/apps/{dev,staging,prod}/         # one overlay per env
+.github/workflows/promote.yml              # manual workflow_dispatch:
+                                           #   from: dev → staging → prod
+                                           # (copies signed digest forward)
+```
+
+`prod` lives in a GitHub Environment with a manual approver gate.
+Promotion is by image digest, never by `:latest` tag flip.
+
+---
+
+## What's deferred for production
+
+- **Linkerd / Istio service mesh** for mTLS + traffic-split-based canaries
+  driven by Prometheus SLO metrics. Argo Rollouts handles the canary today
+  via Job-based AnalysisTemplate; mesh-driven traffic split is the next-tier
+  upgrade.
+- **Cloud Armor + global HTTPS LB + custom domain + managed cert.**
+  Currently exposed via L4 LoadBalancer Service.
+- **Cloud SQL HA + PITR + IAM auth via the Auth Proxy.** Currently the api
+  uses plain DSN with the password from Secret Manager. Switching to IAM
+  auth requires creating the Postgres user with
+  `--type=cloud_iam_service_account`.
+- **Atlas migrations** as a pre-sync Argo CD hook. Currently the api does
+  `CREATE TABLE IF NOT EXISTS hits` on boot.
+- **OpenTelemetry collector + structured tracing.** App is wired with the
+  OTel SDK (gated on `OTEL_ENABLE=true`); no collector deployed for the
+  take-home — Cloud Logging picks up stdout natively.
+- **Re-enable default-deny NetworkPolicy** with explicit DNS allow,
+  validated end-to-end before turning enforcement on.
+- **Image signing enforcement** via Binary Authorization + cosign. CI
+  signs images today; BinAuthz is wired in `infra/components/binauthz.ts`
+  for staging/prod stacks but not enforced on dev.
+
+---
+
+## Layout
+
+```
+apps/
+  api/      cmd/api, internal/{db,server,telemetry}     Go: chi + slog + graceful shutdown
+  worker/   cmd/worker, internal/server                  Go: net/http + otelhttp
+infra/                                                   Pulumi (TypeScript)
+  bootstrap/    one-shot: state bucket + WIF + deployer SA
+  components/   gke / postgres / memorystore / secrets / wi / binauthz
+  stacks/       dev / staging / prod
+.github/workflows/
+  ci-app.yml    test → matrix-build → cosign sign → manifest-bump PR
+  ci-infra.yml  pulumi preview on PR; pulumi up on merge per env
+  promote.yml   manual: copy signed digest from one env to the next
+Makefile        make up / make down
+
+# Manifests live in a separate repo (GitOps best practice):
+#   github.com/sachincool/ulys-manifests
+```
+
+---
+
+## References
+
+- [Pulumi Workload Identity for GKE](https://www.pulumi.com/registry/packages/gcp/api-docs/container/cluster/)
+- [Argo Rollouts Canary with AnalysisTemplate](https://argo-rollouts.readthedocs.io/en/stable/features/canary/)
+- [External Secrets Operator: GCPSM provider](https://external-secrets.io/latest/provider/google-secrets-manager/)
+- [Workload Identity Federation for GitHub Actions](https://github.com/google-github-actions/auth)
