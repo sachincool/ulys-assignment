@@ -38,9 +38,9 @@ App code total: ~200 lines.
 
 | | |
 |---|---|
-| 🟢 First green canary deploy | [ci-app run](https://github.com/sachincool/ulys-prod/actions/runs/25154644140) — both images built + signed, manifest digest committed |
-| 🔴 Forcing-function rollback | [ci-app run](https://github.com/sachincool/ulys-prod/actions/runs/25157193906) (broken `/readyz`) — broken image built; Argo Rollouts canary RS could not become Ready, traffic stayed on the stable revision, eventually marked `Degraded` with `ProgressDeadlineExceeded`. **Public traffic exposure to the bad revision: zero.** |
-| ✅ Green re-deploy after revert | [ci-app run](https://github.com/sachincool/ulys-prod/actions/runs/25158353537) — fixed image built; Argo Rollouts canary smoke passes; promoted to 100% |
+| 🟢 First green canary deploy | [ci-app run](https://github.com/sachincool/ulys-assignment/actions/runs/25154644140) — both images built + signed, manifest digest committed |
+| 🔴 Forcing-function rollback | [ci-app run](https://github.com/sachincool/ulys-assignment/actions/runs/25157193906) (broken `/readyz`) — broken image built; Argo Rollouts canary RS could not become Ready, traffic stayed on the stable revision, eventually marked `Degraded` with `ProgressDeadlineExceeded`. **Public traffic exposure to the bad revision: zero.** |
+| ✅ Green re-deploy after revert | [ci-app run](https://github.com/sachincool/ulys-assignment/actions/runs/25158353537) — fixed image built; Argo Rollouts canary smoke passes; promoted to 100% |
 | 📜 `pulumi destroy` output | [`docs/destroy.txt`](docs/destroy.txt) |
 | 🧾 Billing screenshot | [`docs/billing.png`](docs/billing.png) |
 | 🖼️ Visual walk-through | [`docs/SETUP_DOCS.md`](docs/SETUP_DOCS.md) |

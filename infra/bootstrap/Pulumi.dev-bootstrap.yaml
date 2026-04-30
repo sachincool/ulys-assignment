@@ -2,4 +2,4 @@ encryptionsalt: v1:59pRjkpmyGk=:v1:f4Sniq+jb+MxbOVl:E3YmZEZ0UyaIV7JZQ+8PhqhOcIRk
 config:
   gcp:project: ulys-dev-34490
   gcp:region: us-central1
-  ulys-bootstrap:githubRepo: sachincool/ulys-prod
+  ulys-bootstrap:githubRepo: sachincool/ulys-assignment

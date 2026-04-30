@@ -20,7 +20,7 @@
 ENV              ?= dev
 PROJECT_ID       ?= $(error PROJECT_ID is required)
 BILLING_ACCOUNT  ?= $(error BILLING_ACCOUNT is required)
-GITHUB_REPO      ?= sachincool/ulys-prod
+GITHUB_REPO      ?= sachincool/ulys-assignment
 MANIFEST_REPO    ?= sachincool/ulys-manifests
 REGION           ?= us-central1
 

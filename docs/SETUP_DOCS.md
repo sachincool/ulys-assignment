@@ -2,7 +2,7 @@
 
 What this stack looks like once `make up ENV=dev …` completes. Captured
 against the live deploy at `ulys-dev-34490` /
-`sachincool/ulys-prod` + `sachincool/ulys-manifests`.
+`sachincool/ulys-assignment` + `sachincool/ulys-manifests`.
 
 Companion to the project [`README.md`](../README.md).
 
@@ -79,7 +79,7 @@ private services access; no public surface.
 
 GitHub Actions assumes the deployer GSA via OIDC. The provider's
 `attribute_condition` pins trust to one repository AND one GitHub
-Environment (`assertion.repository == "sachincool/ulys-prod" &&
+Environment (`assertion.repository == "sachincool/ulys-assignment" &&
 assertion.environment == "dev"`).
 
 ![WIF pool](screenshots/10-wif.png)
