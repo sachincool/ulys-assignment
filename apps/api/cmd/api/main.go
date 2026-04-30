@@ -13,7 +13,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/redis/go-redis/v9"
-	"go.opentelemetry.io/contrib/instrumentation/github.com/go-chi/chi/otelchi"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"github.com/sachincool/ulys/apps/api/internal/db"
 	"github.com/sachincool/ulys/apps/api/internal/server"
@@ -79,7 +79,6 @@ func main() {
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.RealIP)
 	r.Use(middleware.RequestID)
-	r.Use(otelchi.Middleware(serviceName, otelchi.WithChiRoutes(r)))
 	r.Use(slogRequestLogger(logger))
 	r.Use(corsAllowAll)
 
@@ -95,7 +94,7 @@ func main() {
 	port := envOr("PORT", "8080")
 	httpSrv := &http.Server{
 		Addr:              ":" + port,
-		Handler:           r,
+		Handler:           otelhttp.NewHandler(r, serviceName),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      15 * time.Second,
