@@ -1,0 +1,95 @@
+=== ulys dev tear-down log ===
+Project: ulys-dev-34490
+Started: 2026-04-30T09:55:58Z
+
+=== pulumi destroy on infra/stacks/dev ===
+Destroying (dev):
+
+@ destroying....
+ -  gcp:serviceaccount:IAMMember worker-wi deleting (0s) 
+ -  gcp:projects:IAMMember eso-role-0 deleting (0s) 
+ -  gcp:projects:IAMMember api-role-1 deleting (0s) 
+ -  gcp:projects:IAMMember worker-role-1 deleting (0s) 
+ -  gcp:projects:IAMMember api-role-3 deleting (0s) 
+ -  gcp:secretmanager:SecretIamMember db-app-password-reader-1 deleting (0s) 
+ -  gcp:serviceaccount:IAMMember eso-wi deleting (0s) 
+ -  gcp:projects:IAMMember api-role-0 deleting (0s) 
+ -  gcp:projects:IAMMember worker-role-2 deleting (0s) 
+ -  gcp:secretmanager:SecretIamMember db-app-password-reader-0 deleting (0s) 
+ -  gcp:sql:Database ulys-pg-app deleting (0s) 
+ -  gcp:projects:IAMMember api-role-2 deleting (0s) 
+ -  gcp:serviceaccount:IAMMember api-wi deleting (0s) 
+ -  gcp:sql:User ulys-pg-user deleting (0s) 
+ -  gcp:secretmanager:SecretVersion db-app-password-v1 deleting (0s) 
+ -  gcp:projects:IAMMember worker-role-0 deleting (0s) 
+@ destroying.............
+ -  gcp:sql:Database ulys-pg-app deleting (10s) error:   sdk-v2/provider2.go:385: sdk.helper_schema: Error when reading or editing Database: googleapi: Error 400: Invalid request: failed to delete database app. Detail: pq: database "app" is being accessed by other users., invalid: provider=google-beta@7.38.0
+ -  gcp:sql:Database ulys-pg-app deleting (10s) error: deleting urn:pulumi:dev::ulys-dev::ulys:db:Postgres$gcp:sql/database:Database::ulys-pg-app: 1 error occurred:
+ -  gcp:sql:Database ulys-pg-app **deleting failed** error: deleting urn:pulumi:dev::ulys-dev::ulys:db:Postgres$gcp:sql/database:Database::ulys-pg-app: 1 error occurred:
+@ destroying..........
+ -  gcp:serviceaccount:IAMMember worker-wi deleted (17s) 
+@ destroying.........
+ -  gcp:projects:IAMMember api-role-0 deleted (23s) 
+@ destroying.....
+ -  gcp:secretmanager:SecretIamMember db-app-password-reader-0 deleted (24s) 
+@ destroying.....
+ -  gcp:serviceaccount:IAMMember api-wi deleted (27s) 
+@ destroying..................
+ -  gcp:projects:IAMMember worker-role-2 deleted (42s) 
+@ destroying..........
+ -  gcp:projects:IAMMember api-role-2 deleted (49s) 
+@ destroying....
+ -  gcp:secretmanager:SecretIamMember db-app-password-reader-1 deleted (50s) 
+@ destroying..........
+ -  gcp:projects:IAMMember eso-role-0 deleted (57s) 
+@ destroying.......
+ -  gcp:serviceaccount:IAMMember eso-wi deleted (60s) 
+ -  gcp:sql:User ulys-pg-user deleting (60s) error:   sdk-v2/provider2.go:385: sdk.helper_schema: Error, failed to deleteuser app in instance ulys-pg-1231ff3: googleapi: Error 400: Invalid request: failed to delete user app: . role "app" cannot be dropped because some objects depend on it Details: 2 objects in database app., invalid: provider=google-beta@7.38.0
+ -  gcp:sql:User ulys-pg-user deleting (60s) error: deleting urn:pulumi:dev::ulys-dev::ulys:db:Postgres$gcp:sql/user:User::ulys-pg-user: 1 error occurred:
+ -  gcp:sql:User ulys-pg-user **deleting failed** error: deleting urn:pulumi:dev::ulys-dev::ulys:db:Postgres$gcp:sql/user:User::ulys-pg-user: 1 error occurred:
+@ destroying.......
+ -  gcp:secretmanager:SecretVersion db-app-password-v1 deleted (65s) 
+@ destroying........
+ -  gcp:projects:IAMMember worker-role-1 deleted (70s) 
+@ destroying....
+ -  gcp:projects:IAMMember api-role-1 deleted (71s) 
+@ destroying....
+ -  gcp:projects:IAMMember api-role-3 deleted (72s) 
+@ destroying..........
+ -  gcp:projects:IAMMember worker-role-0 deleted (79s) 
+@ destroying......................................
+    pulumi:pulumi:Stack ulys-dev-dev  error: update failed
+    pulumi:pulumi:Stack ulys-dev-dev **failed** 1 error
+Diagnostics:
+  pulumi:pulumi:Stack (ulys-dev-dev):
+    error: update failed
+
+  gcp:sql:Database (ulys-pg-app):
+    error:   sdk-v2/provider2.go:385: sdk.helper_schema: Error when reading or editing Database: googleapi: Error 400: Invalid request: failed to delete database app. Detail: pq: database "app" is being accessed by other users., invalid: provider=google-beta@7.38.0
+    error: deleting urn:pulumi:dev::ulys-dev::ulys:db:Postgres$gcp:sql/database:Database::ulys-pg-app: 1 error occurred:
+    	* Error when reading or editing Database: googleapi: Error 400: Invalid request: failed to delete database app. Detail: pq: database "app" is being accessed by other users., invalid
+
+  gcp:sql:User (ulys-pg-user):
+    error:   sdk-v2/provider2.go:385: sdk.helper_schema: Error, failed to deleteuser app in instance ulys-pg-1231ff3: googleapi: Error 400: Invalid request: failed to delete user app: . role "app" cannot be dropped because some objects depend on it Details: 2 objects in database app., invalid: provider=google-beta@7.38.0
+    error: deleting urn:pulumi:dev::ulys-dev::ulys:db:Postgres$gcp:sql/user:User::ulys-pg-user: 1 error occurred:
+    	* Error, failed to deleteuser app in instance ulys-pg-1231ff3: googleapi: Error 400: Invalid request: failed to delete user app: . role "app" cannot be dropped because some objects depend on it Details: 2 objects in database app., invalid
+
+Resources:
+    - 14 deleted
+    3 errored
+
+Duration: 1m56s
+
+
+=== pulumi destroy hit Cloud SQL user-with-dependent-objects (same as take-home) ===
+=== falling back to project delete (per plan; immediate billing stop, 30d undelete window) ===
+Started project delete: 2026-04-30T09:58:40Z
+Deleted [https://cloudresourcemanager.googleapis.com/v1/projects/ulys-dev-34490].
+
+You can undo this operation for a limited period by running the command below.
+    $ gcloud projects undelete ulys-dev-34490
+
+See https://cloud.google.com/resource-manager/docs/creating-managing-projects for information on shutting down projects.
+
+Project: ulys-dev-34490 — DELETED
+Billing: stopped at 2026-04-30T09:58:47Z
