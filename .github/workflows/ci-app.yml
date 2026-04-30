@@ -186,7 +186,13 @@ jobs:
           REDIS_ADDR:        ${{ steps.tfout.outputs.redis_host }}:${{ steps.tfout.outputs.redis_port }}
         run: |
           set -euo pipefail
-          kustomize build manifests/overlays/dev | envsubst | kubectl apply -f -
+          # IMPORTANT: pass an explicit allowlist to envsubst. Unrestricted
+          # envsubst eats *any* $VAR — including $code in the
+          # AnalysisTemplate's curl probe shell snippet — and replaces
+          # them with empty strings, silently breaking the canary probe.
+          kustomize build manifests/overlays/dev \
+            | envsubst '${PROJECT_ID} ${API_LB_STATIC_IP} ${API_GSA_EMAIL} ${WORKER_GSA_EMAIL} ${DB_HOST} ${REDIS_ADDR}' \
+            | kubectl apply -f -
 
       - name: Watch Rollout to completion (gate on Healthy)
         id: rollout

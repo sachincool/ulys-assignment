@@ -165,7 +165,12 @@ deploy:
     # CI does the real digest bumps; for local `just up` the placeholders
     # are deliberately invalid so the Rollout sits in `Progressing` until
     # `ci-app.yml` runs against this cluster.
-    kustomize build manifests/overlays/{{env}} | envsubst | kubectl apply -f -
+    # IMPORTANT: pass an explicit allowlist to envsubst. Unrestricted
+    # envsubst eats *any* $VAR including the `$code` in the
+    # AnalysisTemplate's shell probe — silently breaking the canary.
+    kustomize build manifests/overlays/{{env}} \
+      | envsubst '${PROJECT_ID} ${API_LB_STATIC_IP} ${API_GSA_EMAIL} ${WORKER_GSA_EMAIL} ${DB_HOST} ${REDIS_ADDR}' \
+      | kubectl apply -f -
 
 # Step 5: wait for Rollout to reach Healthy (timeout 10m)
 verify:
