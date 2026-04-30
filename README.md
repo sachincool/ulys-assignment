@@ -79,7 +79,7 @@ pre-empts the questions a careful review would otherwise ask.
 The submission table links three ci-app runs:
 
 - **🟢 first green canary** → look for `Watch Rollout to completion (gate on Healthy)` succeeding and the `Smoke /readyz on public LB ×10` step printing 10 × 200s.
-- **🔴 forcing-function rollback** → look for `Watch Rollout` exiting non-zero with the AnalysisRun's curl-Job logs visible. The rollout's `Aborted` status is the success criterion of *this* run, not a failure to investigate. CI fails on purpose so the bad image never gets promoted.
+- **🔴 forcing-function rollback** → look for the `Watch Rollout` step exiting non-zero at the `kubectl argo rollouts status --timeout 10m` deadline. Two failure modes both show up as auto-rollback in this stack: (a) the canary becomes Ready but `/readyz` returns non-200 → AnalysisRun `Failed` → Rollout `Aborted` (the textbook path), and (b) the canary never becomes Ready because its readiness probe IS `/readyz` → Service excludes the unready pod → 0% public exposure → progressDeadline / status-timeout trips → Rollout `Aborted`. The demo run (#25194221144) hit path (b), which is the *stronger* outcome — broken pods never serve a single public request. The Rollout's `Degraded — RolloutAborted` status is the success criterion of *this* run, not a failure to investigate. CI fails on purpose so the bad image never gets promoted.
 - **✅ green re-deploy** → same shape as the first run, on the revert commit.
 
 ### What I'd change if I had another day
@@ -96,14 +96,13 @@ The brief's `~$5–15/mo` target is a serverless target. On any GKE (Autopilot o
 
 | | |
 |---|---|
-| 🟢 First green canary deploy | [ci-app run](https://github.com/sachincool/ulys-assignment/actions/runs/REPLACE_ME) — image built, Argo Rollouts walked 10 → 50 → 100 with `/readyz` AnalysisRuns green at every step |
-| 🔴 Forcing-function rollback | [ci-app run](https://github.com/sachincool/ulys-assignment/actions/runs/REPLACE_ME) — broken `/readyz` (intentionally bad DB password via dev overlay) → AnalysisRun `Failed` at the first probe step → Rollout `Aborted` → traffic stays 100% on prior stable revision → CI fails. **Public traffic exposure to the bad revision: one of two pods (~33–50% by kube-proxy round-robin) for ~30–70s** — Argo Rollouts without a TrafficRouter splits by ReplicaSet pod count, not HTTP weight, so `setWeight: 10` with `replicas: 2` lands at one canary pod, not 10% of requests. The brief's spirit (bounded blast radius, fast auto-rollback) is preserved; precise weighted L7 split needs a mesh or NGINX Ingress (see [What's deferred](#whats-deferred-for-production)). |
-| ✅ Green re-deploy after revert | [ci-app run](https://github.com/sachincool/ulys-assignment/actions/runs/REPLACE_ME) — fixed image, Rollout reaches Healthy |
-| 📜 `terraform destroy` output | [`docs/destroy.txt`](docs/destroy.txt) |
-| 🧾 Billing screenshot | [`docs/billing.png`](docs/billing.png) |
-| 🖼️ Visual walk-through | [`docs/SETUP_DOCS.md`](docs/SETUP_DOCS.md) |
-| 🌐 Live api (when up) | `http://<api_lb_static_ip>` (`terraform output -raw api_lb_static_ip`) — `/livez /healthz /readyz /version /work` |
-| 🌐 Live web (when up) | `https://storage.googleapis.com/<PROJECT_ID>-web/index.html` |
+| 🟢 First green canary deploy | **[ci-app #25193959217](https://github.com/sachincool/ulys-assignment/actions/runs/25193959217)** — Argo Rollouts walked `setWeight 10 → analysis ✔ → 50 → analysis ✔ → 100` in 4m3s. Both AnalysisRuns (`api-78795c4469-7-2`, `api-78795c4469-7-5`) succeeded with 3/3 `/readyz` probes returning 200. Stable image: `api:b09e4ce36ac1`. |
+| 🔴 Forcing-function rollback | **[ci-app #25194221144](https://github.com/sachincool/ulys-assignment/actions/runs/25194221144)** — `manifests/overlays/dev/kustomization.yaml` patched to redirect `DB_PASSWORD_FILE` at `/etc/hostname`; api boots, `/livez` 200, `/readyz` 503 (DB auth fails on the wrong-content "password"). Canary pod's readiness gate failed, so the Service excluded it from endpoints — **public traffic exposure to the broken revision: 0%** (smoke against the LB returned 200 for the entire 14-min window, all from the stable revision). `Watch Rollout` step exited 1 at the 10-min `kubectl argo rollouts status` timeout, deploy job marked failed, Rollout marked `Degraded — RolloutAborted`, canary RS scaled to 0. Auto-rollback signal: red CI + Rollout state, both visible. |
+| ✅ Green re-deploy after revert | **[ci-app #25194700814](https://github.com/sachincool/ulys-assignment/actions/runs/25194700814)** — `git revert` of the forcing-function commit. Clean canary walk in 4m7s, AnalysisRun `api-78449985c7-9-2 ✔ Successful`. Stable now: `api:fed4b4e9b70a`. |
+| 🟢 ci-infra apply (idempotent + alerting wired) | **[ci-infra #25195034617](https://github.com/sachincool/ulys-assignment/actions/runs/25195034617)** — `terraform apply` 21s, 0 destroyed, 1 added (`google_monitoring_notification_channel.email`), 2 updated (alert policy + budget gain the channel). |
+| 🌐 Live api | **`http://34.68.6.121`** — `/livez /healthz /readyz /version /work`. `/version` returns `{"sha":"fed4b4e9b70a", "hostname":"api-78449985c7-..."}` |
+| 🌐 Live web | **<https://storage.googleapis.com/ulys-dev-72976-web/index.html>** — `${API_URL}` substituted to `http://34.68.6.121` by the `deploy-web` job |
+| 🖼️ Walk-through | [`docs/SETUP_DOCS.md`](docs/SETUP_DOCS.md) — single-repo Kustomize layout, GKE Autopilot, Workload Identity, GSM CSI file-mount, and the forcing-function recipe |
 
 ---
 
