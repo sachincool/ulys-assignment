@@ -53,7 +53,11 @@ jobs:
           ./kustomize build manifests/overlays/dev > /tmp/rendered.yaml
           # Replace placeholders with sentinels so client-side dry-run doesn't choke on ${VAR}.
           sed -i 's/\${[A-Z_]*}/placeholder/g' /tmp/rendered.yaml
-          kubectl apply --dry-run=client -f /tmp/rendered.yaml
+          # --validate=false because the runner has no cluster (and no
+          # OpenAPI schema for the Argo Rollouts / Secrets Store CSI CRDs).
+          # `kustomize build` exits non-zero on YAML/structural errors,
+          # which is the real signal we want from this lint job.
+          kubectl apply --dry-run=client --validate=false -f /tmp/rendered.yaml
 
   build:
     needs: test

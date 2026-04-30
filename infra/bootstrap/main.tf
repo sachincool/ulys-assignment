@@ -71,6 +71,9 @@ locals {
     # resources (terraform's refresh step calls projects.getIamPolicy, which
     # roles/iam.serviceAccountAdmin doesn't grant).
     "roles/resourcemanager.projectIamAdmin",
+    # Required for terraform to refresh + manage google_container_cluster
+    # (calls container.clusters.get/update/etc.).
+    "roles/container.admin",
   ]
 }
 
