@@ -14,3 +14,19 @@ images:
   - name: ulys/worker
     newName: PLACEHOLDER_REGISTRY/PROJECT/ulys/worker
     newTag: placeholder
+
+# DEMO: forcing function — redirect DB_PASSWORD_FILE to a wrong-content
+# file. /etc/hostname exists in the distroless container and contains the
+# pod hostname, not a postgres password. The api boots fine (file read
+# succeeds), /livez stays 200, but /readyz pings the DB pool — auth fails
+# — /readyz returns 503. Argo Rollouts canary AnalysisRun fails, rollout
+# aborts, traffic stays on the stable revision. Revert this commit to
+# recover.
+#
+# Index 5 corresponds to DB_PASSWORD_FILE in manifests/base/api-rollout.yaml.
+patches:
+  - target: { kind: Rollout, name: api }
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/env/5/value
+        value: "/etc/hostname"
