@@ -74,11 +74,16 @@ bootstrap:
       -var "env={{env}}" \
       -var "github_repo={{github_repo}}"
 
-    echo "==> grant deployer SA roles/billing.user on the billing account"
+    echo "==> grant deployer SA billing.user + billing.costsManager"
+    # billing.user → can attach the project to the billing account.
+    # billing.costsManager → can read+write budgets (terraform refresh
+    # of google_billing_budget calls billingbudgets.budgets.get).
     DEPLOYER=$(terraform output -raw deployer_sa_email)
-    gcloud billing accounts add-iam-policy-binding "$BILLING_ACCOUNT" \
-      --member="serviceAccount:$DEPLOYER" \
-      --role="roles/billing.user" >/dev/null
+    for role in billing.user billing.costsManager; do
+      gcloud billing accounts add-iam-policy-binding "$BILLING_ACCOUNT" \
+        --member="serviceAccount:$DEPLOYER" \
+        --role="roles/$role" >/dev/null
+    done
 
     echo "==> wire GitHub Actions vars on {{github_repo}}"
     WIF=$(terraform output -raw wif_provider_resource)

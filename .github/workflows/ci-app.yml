@@ -46,18 +46,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: azure/setup-kubectl@v4
-      - name: kustomize build (syntax)
+      - name: kustomize build + yaml parse
+        # kubectl --dry-run=client still does cluster API discovery in
+        # 1.35+, so it's useless without a cluster. `kustomize build`
+        # exits non-zero on overlay/patch errors and base YAML issues,
+        # and the python parse catches any structural breakage — which
+        # is the actual signal we want pre-deploy.
         run: |
+          set -euo pipefail
           curl -sSL "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
           ./kustomize build manifests/overlays/dev > /tmp/rendered.yaml
-          # Replace placeholders with sentinels so client-side dry-run doesn't choke on ${VAR}.
-          sed -i 's/\${[A-Z_]*}/placeholder/g' /tmp/rendered.yaml
-          # --validate=false because the runner has no cluster (and no
-          # OpenAPI schema for the Argo Rollouts / Secrets Store CSI CRDs).
-          # `kustomize build` exits non-zero on YAML/structural errors,
-          # which is the real signal we want from this lint job.
-          kubectl apply --dry-run=client --validate=false -f /tmp/rendered.yaml
+          test -s /tmp/rendered.yaml
+          docs=$(python3 -c "import sys, yaml; print(sum(1 for _ in yaml.safe_load_all(open('/tmp/rendered.yaml')) if _))")
+          echo "kustomize build OK — $(wc -l < /tmp/rendered.yaml) lines, ${docs} valid yaml docs"
 
   build:
     needs: test
