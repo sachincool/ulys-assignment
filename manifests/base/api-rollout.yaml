@@ -59,6 +59,8 @@ spec:
               value: http://worker.ulys.svc.cluster.local
             - name: DB_PASSWORD_FILE
               value: /var/run/secrets/gsm/db-password
+            - name: GIT_SHA
+              value: ${GIT_SHA}
           volumeMounts:
             - name: gsm
               mountPath: /var/run/secrets/gsm

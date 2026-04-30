@@ -258,8 +258,14 @@ Why ID tokens, not HMAC or mTLS:
   payoff. Convert to Argo CD when reconciliation drift across teams
   becomes a real cost. Note in [What's deferred](#whats-deferred-for-production).
 - **GSM CSI driver, not External Secrets Operator.** Single secret
-  (`db-app-password`) mounted directly from Secret Manager via the
-  CSI driver, sync'd into a K8s Secret the api consumes via `envFrom`.
+  (`db-app-password`) mounted directly from Secret Manager as a file
+  via the GKE-managed Secrets Store CSI add-on
+  (`secrets-store-gke.csi.k8s.io`); the api reads
+  `$DB_PASSWORD_FILE = /var/run/secrets/gsm/db-password` at startup.
+  No K8s Secret round-trip — Autopilot doesn't grant the managed
+  driver KSA cluster-wide `secrets.list/watch`, so `secretObjects`
+  sync doesn't work there anyway, and file-mount is the cleaner
+  pattern (same shape as Cloud Run secret injection / Vault Agent).
   ESO pays for itself with N secrets × M namespaces; here it would be
   a controller in front of one binding.
 - **Workload Identity, no JSON keys.** Both runtime KSAs (`ulys/api`,

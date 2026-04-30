@@ -65,8 +65,9 @@ kubectl apply --dry-run`) and on merge to `main`:
 
 `db-f1-micro`, private IP only. Reachable from the cluster via the
 VPC's private services access; no public surface. The api connects
-with the password from Secret Manager (mounted via GSM CSI →
-`api-secrets` K8s Secret).
+with the password from Secret Manager, mounted as a file via the
+GKE-managed Secret Manager CSI add-on (read at startup from
+`$DB_PASSWORD_FILE = /var/run/secrets/gsm/db-password`).
 
 ### Memorystore Redis
 
@@ -97,23 +98,28 @@ assertion.environment == "dev"`).
 
 ### Secret Manager
 
-`db-app-password` is the only runtime secret. The GSM CSI driver
-mounts it into the api Pod via `SecretProviderClass: api-gsm`,
-synced to a K8s Secret `api-secrets` consumed via `envFrom`. **No
-cleartext password in TF state, in git, or anywhere on disk in the
-repo.**
+`db-app-password` is the only runtime secret. The GKE-managed Secrets
+Store CSI add-on mounts it into the api Pod as a file at
+`/var/run/secrets/gsm/db-password` via `SecretProviderClass: api-gsm`
+(`provider: gke`, driver `secrets-store-gke.csi.k8s.io`). The api
+reads `$DB_PASSWORD_FILE` at startup. No K8s Secret round-trip — the
+managed driver KSA isn't granted cluster-wide `secrets.list/watch`
+on Autopilot, so the upstream `secretObjects` sync mode doesn't work
+there anyway, and file-mount is the cleaner pattern (same shape as
+Cloud Run secret injection / Vault Agent). **No cleartext password
+in TF state, in git, or anywhere on disk in the repo.**
 
 ---
 
 ## 4 · Forcing function — how to reproduce
 
 The cleanest forcing function is a **manifest-only** change that
-overrides `DB_PASSWORD` in the dev overlay with a literal wrong
-value. No app code mutates, the diff is one line, and revert is
-`git revert`. The audit-grade alternative — editing `apps/api/internal/db/db.go`
-to hard-code a wrong password — works but mutates app code that
-reviewers then have to mentally undo, so it's not the recommended
-path.
+redirects `DB_PASSWORD_FILE` in the dev overlay at a wrong-content
+file. `/etc/hostname` exists in the distroless container image and
+contains the pod hostname (not a valid postgres password), so the
+api boots fine, `/livez` returns 200, but `/readyz` calls into the
+db pool — connection auth fails — `/readyz` returns 503. No app
+code mutates, the diff is one line, revert is `git revert`.
 
 ```yaml
 # manifests/overlays/dev/kustomization.yaml — append:
@@ -121,12 +127,13 @@ path.
 patches:
   - target: { kind: Rollout, name: api }
     patch: |-
-      - op: add
-        path: /spec/template/spec/containers/0/env/-
-        value:
-          name: DB_PASSWORD
-          value: "definitely-not-the-real-password"
+      - op: replace
+        path: /spec/template/spec/containers/0/env/5/value
+        value: "/etc/hostname"
 ```
+
+(Index `5` is `DB_PASSWORD_FILE` in `manifests/base/api-rollout.yaml`'s
+`env:` list — verify the index before applying.)
 
 ```bash
 # After the green initial deploy:
@@ -135,19 +142,20 @@ patches:
 # 2. git commit + push to main.
 #
 # CI builds the (unchanged) image, kustomize-edits the Rollout, applies.
-# The literal env wins over the secretRef (envFrom is overlaid first,
-# explicit env entries take precedence). Argo Rollouts spawns a canary
-# ReplicaSet at setWeight: 10 — which with replicas: 2 means 1 canary
-# pod (~33–50% of traffic by kube-proxy round-robin). The
-# AnalysisTemplate spawns a curl Job hitting /readyz on the canary
-# Service. /readyz tries to ping DB — DB auth fails — /readyz returns
-# 503 — Job exits 1 — AnalysisRun marked Failed — Rollout enters
-# Degraded, scales canary ReplicaSet to 0, routes 100% of traffic
-# back to the stable revision.
+# Argo Rollouts creates a canary ReplicaSet at setWeight: 10 — which
+# with replicas: 2 means 1 canary pod. Kube-proxy round-robins the
+# api-canary Service to the one canary pod, so smoke traffic hits
+# the broken revision until the analysis trips. The AnalysisTemplate
+# spawns a curl Job hitting /readyz on api-canary; /readyz pings DB,
+# DB auth fails (the password is now the literal pod hostname),
+# /readyz returns 503, the Job exits 1, the AnalysisRun is marked
+# Failed (failed > failureLimit). Rollout enters Degraded, scales
+# the canary ReplicaSet to 0, routes 100% of traffic back to the
+# stable revision.
 #
-# Public traffic exposure to the bad revision: ~33–50% of requests
-# (one of two pods) for ~30–70s before the AnalysisRun trips and
-# Rollout aborts. The stable revision serves throughout.
+# Public traffic exposure to the bad revision is bounded by canary
+# weight × analysis time (~10% × 30–70s before the AnalysisRun trips).
+# api-public always has at least one stable pod in its endpoints.
 #
 # To recover: git revert the kustomization commit, push, the next
 # CI run promotes a green revision via the same canary path.

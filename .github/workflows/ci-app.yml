@@ -184,6 +184,7 @@ jobs:
           WORKER_GSA_EMAIL:  ${{ steps.tfout.outputs.worker_sa_email }}
           DB_HOST:           ${{ steps.tfout.outputs.db_private_ip }}
           REDIS_ADDR:        ${{ steps.tfout.outputs.redis_host }}:${{ steps.tfout.outputs.redis_port }}
+          GIT_SHA:           ${{ needs.build.outputs.sha }}
         run: |
           set -euo pipefail
           # IMPORTANT: pass an explicit allowlist to envsubst. Unrestricted
@@ -191,7 +192,7 @@ jobs:
           # AnalysisTemplate's curl probe shell snippet — and replaces
           # them with empty strings, silently breaking the canary probe.
           kustomize build manifests/overlays/dev \
-            | envsubst '${PROJECT_ID} ${API_LB_STATIC_IP} ${API_GSA_EMAIL} ${WORKER_GSA_EMAIL} ${DB_HOST} ${REDIS_ADDR}' \
+            | envsubst '${PROJECT_ID} ${API_LB_STATIC_IP} ${API_GSA_EMAIL} ${WORKER_GSA_EMAIL} ${DB_HOST} ${REDIS_ADDR} ${GIT_SHA}' \
             | kubectl apply -f -
 
       - name: Watch Rollout to completion (gate on Healthy)
