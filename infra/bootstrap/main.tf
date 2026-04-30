@@ -67,6 +67,10 @@ locals {
     "roles/serviceusage.serviceUsageAdmin",
     "roles/storage.admin",
     "roles/monitoring.editor",
+    # Required so the deployer SA can read+write `google_project_iam_member`
+    # resources (terraform's refresh step calls projects.getIamPolicy, which
+    # roles/iam.serviceAccountAdmin doesn't grant).
+    "roles/resourcemanager.projectIamAdmin",
   ]
 }
 

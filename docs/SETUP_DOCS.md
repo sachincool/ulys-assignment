@@ -2,7 +2,11 @@
 
 What this stack looks like once `just up ENV=dev …` completes.
 
-Companion to the project [`README.md`](../README.md).
+Companion to the project [`README.md`](../README.md). **Reviewers — start
+at the README's [§ For reviewers — read me first](../README.md#for-reviewers--read-me-first).**
+That section pre-empts the questions a careful review would otherwise
+ask (cost, blast-radius math, mixed-content, intentional caveats) and
+points to the exact files. This file is the picture-walk after.
 
 ---
 

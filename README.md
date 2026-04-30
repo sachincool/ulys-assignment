@@ -43,6 +43,55 @@ service hits SIGTERM during a rollout.
 
 ---
 
+## For reviewers — read me first
+
+Land here, then jump where you want. Five minutes of context that
+pre-empts the questions a careful review would otherwise ask.
+
+### What to look at, in priority order
+
+1. **The canary + forcing function (the whole point of the brief).**
+   - Rollout spec: [`manifests/base/api-rollout.yaml`](manifests/base/api-rollout.yaml) — 10 → 50 → 100 weighted steps, `pause` + `analysis` between each, `AnalysisTemplate` ref.
+   - Probe: [`manifests/base/analysistemplate.yaml`](manifests/base/analysistemplate.yaml) — Job spawns `curlimages/curl`, hits `/readyz`, exits non-zero on a non-200.
+   - Reproduction recipe: [`docs/SETUP_DOCS.md` § 4 · Forcing function](docs/SETUP_DOCS.md#4--forcing-function--how-to-reproduce). Patch overrides `DB_PASSWORD` in the dev overlay → `/readyz` returns 503 → AnalysisRun fails → Rollout aborts → stable revision keeps serving.
+   - CI gating: [`.github/workflows/ci-app.yml`](.github/workflows/ci-app.yml) — `kubectl argo rollouts status api -n ulys --timeout 10m` exits non-zero on Aborted/Degraded; the workflow then explicitly aborts (belt + suspenders) and `exit 1`s.
+2. **Auth chain.** Three layers, each in one obvious file:
+   - GH Actions → GCP: WIF pool/provider in [`infra/bootstrap/main.tf`](infra/bootstrap/main.tf), pinned to **repo + GH Environment** by `attribute_condition`.
+   - Pod → GCP: KSA → GSA annotation in [`manifests/base/serviceaccounts.yaml`](manifests/base/serviceaccounts.yaml); `workloadIdentityUser` IAM binding in [`infra/envs/dev/runtime.tf`](infra/envs/dev/runtime.tf).
+   - api → worker: `idtoken.NewClient` in [`apps/api/internal/server/handlers.go`](apps/api/internal/server/handlers.go); JWT validation (sig + iss + aud + email + email_verified) in [`apps/worker/cmd/worker/main.go`](apps/worker/cmd/worker/main.go) — ~30 LOC.
+3. **Defense in depth on api → worker.** [`manifests/base/networkpolicy.yaml`](manifests/base/networkpolicy.yaml) — only `app=api` pods can reach `app=worker:8080`. Enforced by GKE Autopilot's Dataplane V2 (Cilium).
+4. **Pod Security restricted at the namespace boundary.** [`manifests/base/namespace.yaml`](manifests/base/namespace.yaml) sets `enforce/audit/warn=restricted`. Every pod in `ulys` (api, worker, **and** the AnalysisTemplate probe Job) carries a hardened `securityContext`.
+
+### Known caveats — intentional, surfaced here so they don't read as bugs
+
+| Caveat | Why it's like this | Where to fix it |
+|---|---|---|
+| **Idle cost lands ~$135/mo, not the brief's $5–15.** | Autopilot's $73/mo cluster fee + Memorystore BASIC's $35/mo floor are unavoidable on this shape. See [Estimated monthly cost](#estimated-monthly-cost-us-central1-idle-dev) for the line-by-line. | $5–15 only fits a serverless shape (Cloud Run + auto-pause SQL + no Redis). `just down` returns to $0 in seconds. |
+| **`$20` budget alert fires day 1.** | Deliberate tripwire — proves the alert path works end-to-end on first stand-up. | Bump `var.budget_amount` to `15000` (~$150) for a non-tripping ceiling. |
+| **Canary blast radius is ~33–50% of traffic, not 10%.** | Argo Rollouts without a TrafficRouter splits by **pod count**; with `replicas: 2` and `setWeight: 10`, you get 1 canary pod = 1/3 of pods (during surge) ≈ kube-proxy RR. The brief's spirit (bounded blast radius, fast auto-rollback) is intact; the precise number is honest. | Add NGINX Ingress / Linkerd as the `trafficRouting` provider, or bump `replicas` to 10. Listed in [What's deferred](#whats-deferred-for-production). |
+| **Web → API hits HTTP from an HTTPS page → mixed-content block.** | GCS serves `https://`, the api LB is L4 `http://`. Modern browsers refuse the cross-scheme `fetch`. | Open the page from `http://storage.googleapis.com/...` (GCS serves both schemes), or open `apps/web/index.html` over `file://`. The prod upgrade — global HTTPS LB + custom domain + managed cert — dissolves this. |
+| **Cluster is zonal (`us-central1-a`).** | `var.zone` default. Same $73/mo control-plane fee as regional but single-AZ blast radius — appropriate for dev. | Flip `location = var.region` for regional HA in prod. Documented in [Architecture decisions](#architecture-decisions) and the prod-comparison table. |
+| **Dev master_authorized_networks is `0.0.0.0/0`.** | Take-home convenience so a reviewer can `kubectl` from anywhere. | Tightened to `<CI runner CIDR>` + bastion in prod ([prod-comparison table](#adding-a-production-environment-described-not-built)). |
+| **App is ~530 LOC, brief said <200.** | The brief's <200 is for the trivial handler code; the chi + pgx + redis + slog + graceful-shutdown + WI ID-token boilerplate is the other ~300 and pays for itself first SIGTERM. OTel SDK is gated on `OTEL_ENABLE=true` — no collector, so it costs zero runtime but adds LOC. | If LOC matters more than ergonomics, drop `apps/api/internal/telemetry` + the chi middleware (~60 LOC). |
+
+### How to read CI runs
+
+The submission table links three ci-app runs:
+
+- **🟢 first green canary** → look for `Watch Rollout to completion (gate on Healthy)` succeeding and the `Smoke /readyz on public LB ×10` step printing 10 × 200s.
+- **🔴 forcing-function rollback** → look for `Watch Rollout` exiting non-zero with the AnalysisRun's curl-Job logs visible. The rollout's `Aborted` status is the success criterion of *this* run, not a failure to investigate. CI fails on purpose so the bad image never gets promoted.
+- **✅ green re-deploy** → same shape as the first run, on the revert commit.
+
+### What I'd change if I had another day
+
+In rough priority: NGINX Ingress for true L7 weighted split (tightens caveat #3); a Prometheus AnalysisTemplate replacing the curl-Job probe (richer signal than 200/non-200); BinAuthz + cosign-keyless on every digest (would catch a tampered image at admission time); tighten `master_authorized_networks` to a known CIDR even in dev.
+
+### Where it isn't this stack's problem
+
+The brief's `~$5–15/mo` target is a serverless target. On any GKE (Autopilot or Standard), the cluster fee + Memorystore floor put the realistic floor ~$110/mo. Either accept the $135 number for the GKE shape, or move to Cloud Run + Cloud SQL `auto-pause` + drop Memorystore — that's a different submission with different trade-offs around in-cluster control-plane composability (NetworkPolicy, ServiceMesh, GitOps) which is what GKE buys.
+
+---
+
 ## Submission
 
 | | |
