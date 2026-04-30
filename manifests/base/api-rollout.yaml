@@ -57,9 +57,8 @@ spec:
               value: ${REDIS_ADDR}
             - name: WORKER_URL
               value: http://worker.ulys.svc.cluster.local
-          envFrom:
-            - secretRef:
-                name: api-secrets
+            - name: DB_PASSWORD_FILE
+              value: /var/run/secrets/gsm/db-password
           volumeMounts:
             - name: gsm
               mountPath: /var/run/secrets/gsm
