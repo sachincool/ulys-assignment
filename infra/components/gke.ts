@@ -90,7 +90,13 @@ export class Gke extends pulumi.ComponentResource {
       },
       privateClusterConfig: {
         enablePrivateNodes: true,
-        enablePrivateEndpoint: true,
+        // Public control plane endpoint, restricted by masterAuthorizedNetworks.
+        // Set this to true only when caller passes RFC1918 CIDRs (a bastion
+        // or in-VPC runner) — Google rejects 0.0.0.0/0 with private endpoint.
+        // For most production cases, public endpoint + tight authorized
+        // networks is the right balance: kubectl works from authorized
+        // operator IPs, the data plane has no public IPs.
+        enablePrivateEndpoint: false,
         masterIpv4CidrBlock: masterCidr,
       },
       masterAuthorizedNetworksConfig: args.masterAuthorizedNetworks
@@ -116,14 +122,9 @@ export class Gke extends pulumi.ComponentResource {
         enableComponents: ["SYSTEM_COMPONENTS"],
         managedPrometheus: { enabled: true },
       },
-      // Maintenance: weekly window so node upgrades are predictable.
-      maintenancePolicy: {
-        recurringWindow: {
-          startTime: "2024-01-07T04:00:00Z",
-          endTime:   "2024-01-07T08:00:00Z",
-          recurrence: "FREQ=WEEKLY;BYDAY=SU",
-        },
-      },
+      // Maintenance: omit the policy — GKE picks a default that satisfies
+      // its own ≥48h-over-32-days availability rule. Override with a more
+      // restrictive window only when an SRE rotation actually needs it.
     }, { parent: this });
 
     this.nodePool = new gcp.container.NodePool(`${name}-pool`, {

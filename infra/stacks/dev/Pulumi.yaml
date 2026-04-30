@@ -3,12 +3,6 @@ runtime:
   name: nodejs
   options:
     typescript: true
+description: dev environment — minimum-cost variant, single zonal cluster
 backend:
-  # Set after `bootstrap` stack runs:
-  #   pulumi stack init dev --secrets-provider="gcpkms://projects/<proj>/locations/us-central1/keyRings/pulumi-state-dev/cryptoKeys/state"
-  url: gs://ulys-dev-pulumi-state
-config:
-  gcp:project:
-    description: dev GCP project
-  gcp:region:
-    default: us-central1
+  url: gs://ulys-dev-34490-pulumi-state

@@ -41,6 +41,14 @@ export class WorkloadIdentity extends pulumi.ComponentResource {
     }, { parent: this });
     this.gsaEmail = this.gsa.email;
 
+    // The workload pool `<project>.svc.id.goog` only exists once a GKE
+    // cluster with WorkloadIdentityConfig has been created in this project.
+    // Caller must pass the cluster as a `dependsOn` via `opts.dependsOn`
+    // OR include the cluster output in `args.workloadPool` so this binding
+    // implicitly depends on it. We rely on the latter — `workloadPool` is
+    // typically `pulumi.interpolate \`${project}.svc.id.goog\`` for now,
+    // which doesn't carry the dep, so cluster MUST also be passed via
+    // dependsOn at the call site (see `infra/stacks/<env>/index.ts`).
     new gcp.serviceaccount.IAMMember(`${name}-wi`, {
       serviceAccountId: this.gsa.name,
       role: "roles/iam.workloadIdentityUser",

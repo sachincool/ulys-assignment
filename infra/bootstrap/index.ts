@@ -21,39 +21,24 @@ const githubRepo = config.require("githubRepo"); // "owner/repo"
 const project = gcp.config.project!;
 const region = config.get("region") ?? "us-central1";
 
-// State bucket — KMS-encrypted, uniform IAM, versioned, lifecycle-pruned.
-const kmsRing = new gcp.kms.KeyRing("pulumi-state", {
-  location: region,
-  name: `pulumi-state-${env}`,
-});
-
-const kmsKey = new gcp.kms.CryptoKey("pulumi-state", {
-  keyRing: kmsRing.id,
-  name: "state",
-  purpose: "ENCRYPT_DECRYPT",
-  rotationPeriod: "7776000s", // 90d
-});
-
-// gcs.googleapis.com needs to be able to use the key.
-const gcsAgent = pulumi.output(gcp.storage.getProjectServiceAccount({}))
-  .apply(s => `serviceAccount:${s.emailAddress}`);
-new gcp.kms.CryptoKeyIAMMember("pulumi-state-gcs", {
-  cryptoKeyId: kmsKey.id,
-  role: "roles/cloudkms.cryptoKeyEncrypterDecrypter",
-  member: gcsAgent,
-});
-
+// State bucket — uniform IAM, versioned, lifecycle-pruned.
+//
+// CMEK-on-state was the original design but provisioning the GCS
+// service identity right after the project is created is racy. Uniform
+// IAM is the real protection; CMEK is defense-in-depth that's worth
+// adding LATER once the GCS service identity has settled. For prod, we
+// keep the data-layer KMS keys (in the env stack) — that's where the
+// privacy concern actually sits.
 const stateBucket = new gcp.storage.Bucket("pulumi-state", {
   name: `${project}-pulumi-state`,
   location: region,
   uniformBucketLevelAccess: true,
   versioning: { enabled: true },
-  encryption: { defaultKmsKeyName: kmsKey.id },
   lifecycleRules: [{
     condition: { numNewerVersions: 10 },
     action:    { type: "Delete" },
   }],
-}, { dependsOn: [/* gcsAgent IAM */] });
+});
 
 // Workload Identity Federation — GitHub Actions OIDC → GSA.
 const wifPool = new gcp.iam.WorkloadIdentityPool("github", {
@@ -120,4 +105,3 @@ for (const role of roles) {
 export const stateBucketName = stateBucket.name;
 export const wifProviderResource = wifProvider.name;
 export const deployerSaEmail = deployer.email;
-export const kmsKeyId = kmsKey.id;

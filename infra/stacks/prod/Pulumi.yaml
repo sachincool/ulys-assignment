@@ -3,18 +3,6 @@ runtime:
   name: nodejs
   options:
     typescript: true
+description: prod environment — regional control plane, HA Cloud SQL, BinAuthz on
 backend:
   url: gs://ulys-prod-pulumi-state
-config:
-  gcp:project:
-    description: prod GCP project ID
-  gcp:region:
-    default: us-central1
-  ulys-prod:billingAccount:
-    description: GCP billing account ID
-  ulys-prod:ciRunnerCidr:
-    description: Egress CIDR of the CI runner allowed to hit the cluster control plane
-    secret: true
-  ulys-prod:cosignPubKeyPem:
-    description: PEM-encoded cosign public key for prod attestor
-    secret: true

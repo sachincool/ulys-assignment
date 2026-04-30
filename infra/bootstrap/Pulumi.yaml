@@ -8,11 +8,3 @@ description: |
   Run once per env from a laptop with local file backend, then forget.
 backend:
   url: file://./pulumi-state
-config:
-  gcp:project:
-    description: GCP project ID for this env (e.g. ulys-dev-1234)
-  ulys-bootstrap:githubRepo:
-    description: owner/repo string (e.g. sachincool/ulys)
-  ulys-bootstrap:region:
-    description: GCP region
-    default: us-central1

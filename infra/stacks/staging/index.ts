@@ -59,17 +59,17 @@ const cache = new Memorystore("ulys-redis", {
 }, { dependsOn: [net.psaConnection] });
 
 const apiWi = new WorkloadIdentity("api", {
-  gsaName: "api", workloadPool: pulumi.interpolate`${project}.svc.id.goog`,
+  gsaName: "ulys-api", workloadPool: pulumi.interpolate`${project}.svc.id.goog`,
   ksaNamespace: "ulys", ksaName: "api",
   projectRoles: ["roles/cloudsql.client", "roles/cloudtrace.agent", "roles/logging.logWriter", "roles/monitoring.metricWriter"],
 });
 const workerWi = new WorkloadIdentity("worker", {
-  gsaName: "worker", workloadPool: pulumi.interpolate`${project}.svc.id.goog`,
+  gsaName: "ulys-worker", workloadPool: pulumi.interpolate`${project}.svc.id.goog`,
   ksaNamespace: "ulys", ksaName: "worker",
   projectRoles: ["roles/cloudtrace.agent", "roles/logging.logWriter", "roles/monitoring.metricWriter"],
 });
 const esoWi = new WorkloadIdentity("eso", {
-  gsaName: "eso", workloadPool: pulumi.interpolate`${project}.svc.id.goog`,
+  gsaName: "ulys-eso", workloadPool: pulumi.interpolate`${project}.svc.id.goog`,
   ksaNamespace: "external-secrets", ksaName: "external-secrets",
   projectRoles: ["roles/secretmanager.secretAccessor"],
 });

@@ -28,7 +28,9 @@ const net = new Network("ulys", { name: "ulys", region });
 const gke = new Gke("ulys-gke", {
   name: "ulys-gke",
   location: zone,                            // zonal control plane (free)
-  nodeLocations: [zone],                     // single-zone nodes
+  // nodeLocations: omitted — for a zonal cluster, GKE rejects redundant
+  // nodeLocations matching the primary zone. Multi-zone HA = pass an
+  // array of OTHER zones; multi-region = stamp the stack a second time.
   network: net.vpc.id,
   subnetwork: net.subnet.id,
   masterAuthorizedNetworks: [
@@ -53,28 +55,29 @@ const cache = new Memorystore("ulys-redis", {
   tier: "BASIC", memoryGb: 1,
 }, { dependsOn: [net.psaConnection] });
 
+// dependsOn the cluster — workload pool only exists after a GKE cluster
+// with WorkloadIdentityConfig has been created in this project.
 const apiWi = new WorkloadIdentity("api", {
-  gsaName: "api",
+  gsaName: "ulys-api",
   workloadPool: pulumi.interpolate`${project}.svc.id.goog`,
   ksaNamespace: "ulys", ksaName: "api",
   projectRoles: ["roles/cloudsql.client", "roles/cloudtrace.agent", "roles/logging.logWriter", "roles/monitoring.metricWriter"],
-});
+}, { dependsOn: [gke.cluster] });
 const workerWi = new WorkloadIdentity("worker", {
-  gsaName: "worker", workloadPool: pulumi.interpolate`${project}.svc.id.goog`,
+  gsaName: "ulys-worker", workloadPool: pulumi.interpolate`${project}.svc.id.goog`,
   ksaNamespace: "ulys", ksaName: "worker",
   projectRoles: ["roles/cloudtrace.agent", "roles/logging.logWriter", "roles/monitoring.metricWriter"],
-});
+}, { dependsOn: [gke.cluster] });
 const esoWi = new WorkloadIdentity("eso", {
-  gsaName: "eso", workloadPool: pulumi.interpolate`${project}.svc.id.goog`,
+  gsaName: "ulys-eso", workloadPool: pulumi.interpolate`${project}.svc.id.goog`,
   ksaNamespace: "external-secrets", ksaName: "external-secrets",
   projectRoles: ["roles/secretmanager.secretAccessor"],
-});
+}, { dependsOn: [gke.cluster] });
 
-new Secret("redis-auth", {
-  name: "redis-auth",
-  value: cache.instance.authString.apply(s => s ?? ""),
-  readers: [apiWi.gsaEmail, esoWi.gsaEmail],
-});
+// dev's Memorystore is BASIC tier with no AUTH — skip the redis-auth secret
+// entirely. The api Deployment references this secret with `optional: true`
+// so a missing secret leaves REDIS_PASSWORD unset, which is what we want.
+// staging/prod create this secret because they enable AUTH.
 new Secret("db-app-password", {
   name: "db-app-password", value: pg.password,
   readers: [apiWi.gsaEmail, esoWi.gsaEmail],
