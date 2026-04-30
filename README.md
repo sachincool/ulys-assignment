@@ -55,7 +55,7 @@ App code total: ~200 lines.
 # gcloud auth login && gcloud auth application-default login
 
 # Spin up a fresh dev environment from a clean GCP account:
-make up \
+just up \
   ENV=dev \
   PROJECT_ID=ulys-dev-XXXXX \
   BILLING_ACCOUNT=01XXXX-XXXXXX-XXXXXX
@@ -69,10 +69,10 @@ make up \
 #   5. Wait for apps-dev to reach Healthy
 
 # Tear it all back down:
-make down ENV=dev PROJECT_ID=ulys-dev-XXXXX
+just down ENV=dev PROJECT_ID=ulys-dev-XXXXX
 ```
 
-After `make up` finishes, every subsequent change goes through GitOps:
+After `just up` finishes, every subsequent change goes through GitOps:
 push to `main` → CI builds + signs → CI opens a manifest-bump PR →
 merge → Argo CD reconciles → Argo Rollouts does the canary.
 
@@ -191,7 +191,7 @@ infra/                                                   Pulumi (TypeScript)
   ci-app.yml    test → matrix-build → cosign sign → manifest-bump PR
   ci-infra.yml  pulumi preview on PR; pulumi up on merge per env
   promote.yml   manual: copy signed digest from one env to the next
-Makefile        make up / make down
+justfile        just up / just down
 
 # Manifests live in a separate repo (GitOps best practice):
 #   github.com/sachincool/ulys-manifests

@@ -1,6 +1,6 @@
 # Visual walk-through — production K8s build
 
-What this stack looks like once `make up ENV=dev …` completes. Captured
+What this stack looks like once `just up ENV=dev …` completes. Captured
 against the live deploy at `ulys-dev-34490` /
 `sachincool/ulys-assignment` + `sachincool/ulys-manifests`.
 
@@ -42,7 +42,7 @@ env's overlay to the next. **Promotion is by image digest, never by
 
 ## 3 · GCP project
 
-`ulys-dev-34490` owns every dev resource. `make down` returns it to $0.
+`ulys-dev-34490` owns every dev resource. `just down` returns it to $0.
 
 ![GCP project dashboard](screenshots/04-gcp-dashboard.png)
 
@@ -175,7 +175,7 @@ Most of these are real production hardening notes documented in
 ## 6 · Tear-down
 
 ```bash
-make down ENV=dev PROJECT_ID=ulys-dev-34490
+just down ENV=dev PROJECT_ID=ulys-dev-34490
 ```
 
 What it does, in order:
