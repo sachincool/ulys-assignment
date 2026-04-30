@@ -18,11 +18,7 @@ import (
 func New(ctx context.Context) (*pgxpool.Pool, error) {
 	host := getenv("DB_HOST", "")
 	user := getenv("DB_USER", "app")
-	// FORCING-FUNCTION DEMO: hard-code a wrong DB password so /readyz
-	// fails at the canary smoke phase. Argo Rollouts' AnalysisTemplate
-	// runs the smoke Job; the Job's curl /readyz returns 503; the Job
-	// fails; the rollout aborts and traffic stays on the stable revision.
-	pass := "WRONG_PASSWORD_INTENTIONALLY_BROKEN_" + os.Getenv("DB_PASSWORD")[:0]
+	pass := os.Getenv("DB_PASSWORD")
 	name := getenv("DB_NAME", "app")
 	if host == "" {
 		return nil, fmt.Errorf("DB_HOST not set")
