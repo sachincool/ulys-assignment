@@ -41,6 +41,7 @@ jobs:
     needs: test
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    environment: dev
     strategy:
       matrix:
         service: [api, worker]
