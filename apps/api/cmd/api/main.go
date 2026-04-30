@@ -35,12 +35,17 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 
-	shutdownTraces, err := telemetry.Init(ctx, serviceName, gitSHA)
-	if err != nil {
-		logger.Error("otel init", "err", err)
-		// Continue without tracing rather than crash — observability is
-		// not in the request critical path.
-		shutdownTraces = func(context.Context) error { return nil }
+	// OTel: only init if a collector endpoint is reachable. Skipping is the
+	// safe default when the collector isn't yet deployed (e.g., dev). We
+	// don't block the api startup on tracing.
+	shutdownTraces := func(context.Context) error { return nil }
+	if os.Getenv("OTEL_ENABLE") == "true" {
+		s, err := telemetry.Init(ctx, serviceName, gitSHA)
+		if err != nil {
+			logger.Error("otel init", "err", err)
+		} else {
+			shutdownTraces = s
+		}
 	}
 
 	pool, err := db.New(ctx)

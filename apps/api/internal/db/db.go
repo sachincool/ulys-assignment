@@ -3,51 +3,35 @@ package db
 import (
 	"context"
 	"fmt"
-	"net"
+	"net/url"
 	"os"
 
-	"cloud.google.com/go/cloudsqlconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// New opens a pgx pool that connects via the Cloud SQL Auth Proxy when
-// CSQL_INSTANCE_CONNECTION_NAME is set (production), or falls back to a
-// direct private-IP DSN for local-cluster testing.
+// New opens a pgx pool against the env-configured DSN.
 //
-// Auth in prod: IAM auth — the pod's KSA → GSA has roles/cloudsql.client,
-// cloudsqlconn dialer mints an OAuth token per connection. No DB password
-// on the wire. Break-glass password is in Secret Manager but not used by
-// the app.
+// DB_HOST + DB_USER + DB_PASSWORD + DB_NAME are required env vars; the api
+// connects directly to the Cloud SQL private IP via the cluster's VPC.
+// IAM auth via cloudsqlconn is a future enhancement (requires creating
+// the postgres user with --type=cloud_iam_service_account at provision time).
 func New(ctx context.Context) (*pgxpool.Pool, error) {
-	dbName := getenv("DB_NAME", "app")
-	dbUser := getenv("DB_USER", "app")
-
-	dsn := fmt.Sprintf("user=%s database=%s sslmode=disable", dbUser, dbName)
-	cfg, err := pgxpool.ParseConfig(dsn)
-	if err != nil {
-		return nil, fmt.Errorf("parse: %w", err)
-	}
-	cfg.MaxConns = 10
-	cfg.MinConns = 1
-
-	if instance := os.Getenv("CSQL_INSTANCE_CONNECTION_NAME"); instance != "" {
-		dialer, err := cloudsqlconn.NewDialer(ctx,
-			cloudsqlconn.WithIAMAuthN(),
-		)
-		if err != nil {
-			return nil, fmt.Errorf("cloudsql dialer: %w", err)
-		}
-		cfg.ConnConfig.DialFunc = func(ctx context.Context, _ /* network */, _ /* addr */ string) (net.Conn, error) {
-			return dialer.Dial(ctx, instance)
-		}
-	} else {
-		// Fallback: direct private-IP. Used only for local k8s testing.
-		cfg.ConnConfig.Host = getenv("DB_HOST", "localhost")
-		cfg.ConnConfig.Port = 5432
-		cfg.ConnConfig.Password = os.Getenv("DB_PASSWORD")
+	host := getenv("DB_HOST", "")
+	user := getenv("DB_USER", "app")
+	pass := os.Getenv("DB_PASSWORD")
+	name := getenv("DB_NAME", "app")
+	if host == "" {
+		return nil, fmt.Errorf("DB_HOST not set")
 	}
 
-	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	dsn := fmt.Sprintf(
+		"postgres://%s:%s@%s:5432/%s?sslmode=disable&pool_max_conns=10",
+		url.QueryEscape(user),
+		url.QueryEscape(pass),
+		host,
+		name,
+	)
+	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
 		return nil, fmt.Errorf("connect: %w", err)
 	}
