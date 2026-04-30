@@ -10,12 +10,13 @@ resource "google_artifact_registry_repository" "images" {
 # GKE Autopilot — opinionated 2026 default. Workload Identity, Shielded
 # Nodes, NetworkPolicy, image streaming all on by default. Autopilot has a
 # flat ~$0.10/hr cluster management fee (~$73/mo) since late 2023 — there
-# is no longer a "first zonal cluster free" tier. Zonal location keeps the
-# control plane single-AZ which is the cheaper SLA tier and matches the
-# dev blast-radius story; prod flips this to var.region for regional HA.
+# is no longer a "first zonal cluster free" tier. Autopilot requires a
+# regional location (zonal Autopilot was deprecated mid-2024); var.region
+# is the source of truth here. var.zone is retained for any future zonal
+# resource we add (a single-zone Memorystore, a CloudSQL replica, etc.).
 resource "google_container_cluster" "gke" {
   name     = "ulys-gke"
-  location = var.zone
+  location = var.region
   project  = var.project
 
   enable_autopilot    = true

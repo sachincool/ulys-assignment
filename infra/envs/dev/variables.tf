@@ -10,7 +10,7 @@ variable "region" {
 }
 
 variable "zone" {
-  description = "Zone for the GKE Autopilot control plane. Setting this picks a zonal cluster (lower fee than regional, single-AZ blast radius — fine for dev). Must be inside var.region."
+  description = "Default zone inside var.region. Not used by the GKE cluster (Autopilot is regional only); retained for future zonal resources (single-zone Memorystore replicas, CloudSQL HA peer, etc.)."
   type        = string
   default     = "us-central1-a"
 }
