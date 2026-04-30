@@ -1,0 +1,16 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: ulys
+
+resources:
+  - ../../base
+
+# CI updates these via `kustomize edit set image` before each apply.
+images:
+  - name: ulys/api
+    newName: PLACEHOLDER_REGISTRY/PROJECT/ulys/api
+    newTag: placeholder
+  - name: ulys/worker
+    newName: PLACEHOLDER_REGISTRY/PROJECT/ulys/worker
+    newTag: placeholder

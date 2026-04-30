@@ -1,0 +1,20 @@
+# worker may only be ingressed by api pods. Combined with the JWT auth
+# in the worker binary, this is two independent layers — a network-layer
+# block + an application-layer block. Either alone refuses any other
+# pod's calls; both together survive misconfiguration of either.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: worker-ingress-from-api-only
+  namespace: ulys
+spec:
+  podSelector:
+    matchLabels: { app: worker }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app: api }
+      ports:
+        - protocol: TCP
+          port: 8080

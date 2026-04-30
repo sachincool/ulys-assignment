@@ -5,19 +5,24 @@ on:
     branches: [main]
     paths:
       - "apps/**"
+      - "manifests/**"
       - ".github/workflows/ci-app.yml"
   pull_request:
-    paths: ["apps/**"]
+    paths:
+      - "apps/**"
+      - "manifests/**"
+      - ".github/workflows/ci-app.yml"
   workflow_dispatch: {}
 
 permissions:
   contents: read
   id-token: write
-  packages: write
-  pull-requests: write
 
 env:
+  REGION: us-central1
   REGISTRY: us-central1-docker.pkg.dev
+  NAMESPACE: ulys
+  TF_VERSION: "1.7.5"
 
 jobs:
   test:
@@ -25,9 +30,7 @@ jobs:
     strategy:
       matrix:
         service: [api, worker]
-    defaults:
-      run:
-        working-directory: apps/${{ matrix.service }}
+    defaults: { run: { working-directory: apps/${{ matrix.service }} } }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -37,7 +40,20 @@ jobs:
       - run: go vet ./...
       - run: go test -race ./...
 
-  build-and-push:
+  manifests-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-kubectl@v4
+      - name: kustomize build (syntax)
+        run: |
+          curl -sSL "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+          ./kustomize build manifests/overlays/dev > /tmp/rendered.yaml
+          # Replace placeholders with sentinels so client-side dry-run doesn't choke on ${VAR}.
+          sed -i 's/\${[A-Z_]*}/placeholder/g' /tmp/rendered.yaml
+          kubectl apply --dry-run=client -f /tmp/rendered.yaml
+
+  build:
     needs: test
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
@@ -46,71 +62,192 @@ jobs:
       matrix:
         service: [api, worker]
     outputs:
-      api-digest:    ${{ steps.dgst.outputs.api }}
-      worker-digest: ${{ steps.dgst.outputs.worker }}
+      api-image: ${{ steps.collect.outputs.api }}
+      worker-image: ${{ steps.collect.outputs.worker }}
+      sha: ${{ steps.meta.outputs.sha }}
     steps:
       - uses: actions/checkout@v4
-
-      - id: auth
-        uses: google-github-actions/auth@v2
+      - uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ vars.WIF_PROVIDER_DEV }}
           service_account: ${{ vars.DEPLOYER_SA_DEV }}
-
       - uses: google-github-actions/setup-gcloud@v2
-
       - run: gcloud auth configure-docker ${{ env.REGISTRY }} --quiet
-
       - uses: docker/setup-buildx-action@v3
-
       - id: meta
         run: |
           SHA="${GITHUB_SHA::12}"
           IMAGE="${{ env.REGISTRY }}/${{ vars.GCP_PROJECT_ID_DEV }}/ulys/${{ matrix.service }}:$SHA"
           echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
-          echo "sha=$SHA"     >> "$GITHUB_OUTPUT"
-
-      - id: build
-        uses: docker/build-push-action@v5
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@v5
         with:
           context: apps/${{ matrix.service }}
           push: true
           tags: ${{ steps.meta.outputs.image }}
           cache-from: type=gha,scope=${{ matrix.service }}
-          cache-to:   type=gha,scope=${{ matrix.service }},mode=max
+          cache-to: type=gha,scope=${{ matrix.service }},mode=max
+      - id: collect
+        run: echo "${{ matrix.service }}=${{ steps.meta.outputs.image }}" >> "$GITHUB_OUTPUT"
 
-      - id: dgst
-        run: echo "${{ matrix.service }}=${{ steps.build.outputs.digest }}" >> "$GITHUB_OUTPUT"
-
-  bump-manifest:
-    needs: build-and-push
+  # Argo Rollouts handles the canary mechanics:
+  #   - kubectl apply triggers Rollout.spec.template change
+  #   - Rollout creates a canary ReplicaSet at 10%
+  #   - AnalysisTemplate runs `curl /readyz` Jobs; broken /readyz → Job exits 1
+  #     → AnalysisRun `Failed` → Rollout aborts → traffic stays 100% on stable
+  #   - On success, Rollout walks 10 → 50 → 100, then status returns Healthy
+  #
+  # CI's job is to (a) apply the new image, (b) gate on rollout status,
+  # (c) explicitly abort + fail on non-Healthy. Public traffic exposure to
+  # a broken revision: bounded by canary weight × analysis interval (~30s
+  # at 10%), then zero.
+  deploy:
+    needs: build
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    environment: dev
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
         with:
-          repository: sachincool/ulys-manifests
-          token: ${{ secrets.MANIFEST_REPO_PAT }}
-          path: manifests
+          workload_identity_provider: ${{ vars.WIF_PROVIDER_DEV }}
+          service_account: ${{ vars.DEPLOYER_SA_DEV }}
 
-      - run: |
-          cd manifests/apps/dev
-          yq -i ".images[0].digest = \"${{ needs.build-and-push.outputs.api-digest }}\"" kustomization.yaml
-          yq -i ".images[1].digest = \"${{ needs.build-and-push.outputs.worker-digest }}\"" kustomization.yaml
+      - uses: google-github-actions/setup-gcloud@v2
+        with:
+          install_components: gke-gcloud-auth-plugin
 
-      - name: open PR
-        env:
-          GH_TOKEN: ${{ secrets.MANIFEST_REPO_PAT }}
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Read Terraform outputs
+        id: tfout
+        working-directory: infra/envs/dev
         run: |
-          cd manifests
-          BR="bump-dev-${GITHUB_SHA::12}"
-          git config user.name  "ulys-ci"
-          git config user.email "ci@ulys.local"
-          git checkout -b "$BR"
-          git add apps/dev/kustomization.yaml
-          git commit -m "dev: bump api/worker to ${GITHUB_SHA::12}"
-          git push origin "$BR"
-          gh pr create \
-            --title "dev: bump api/worker to ${GITHUB_SHA::12}" \
-            --body "Image digests built by CI. Argo CD reconciles after merge." \
-            --base main --head "$BR"
+          terraform init \
+            -backend-config="bucket=${{ vars.GCP_PROJECT_ID_DEV }}-tf-state" \
+            -backend-config="prefix=envs/dev"
+          {
+            echo "api_lb_static_ip=$(terraform output -raw api_lb_static_ip)"
+            echo "api_sa_email=$(terraform output -raw api_sa_email)"
+            echo "worker_sa_email=$(terraform output -raw worker_sa_email)"
+            echo "db_private_ip=$(terraform output -raw db_private_ip)"
+            echo "redis_host=$(terraform output -raw redis_host)"
+            echo "redis_port=$(terraform output -raw redis_port)"
+            echo "cluster_name=$(terraform output -raw cluster_name)"
+            echo "cluster_location=$(terraform output -raw cluster_location)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Get cluster credentials
+        run: |
+          gcloud container clusters get-credentials \
+            "${{ steps.tfout.outputs.cluster_name }}" \
+            --location="${{ steps.tfout.outputs.cluster_location }}" \
+            --project="${{ vars.GCP_PROJECT_ID_DEV }}"
+
+      - name: Install kustomize + kubectl-argo-rollouts plugin
+        run: |
+          curl -sSL "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+          sudo mv kustomize /usr/local/bin/
+          curl -sSL -o /usr/local/bin/kubectl-argo-rollouts \
+            https://github.com/argoproj/argo-rollouts/releases/latest/download/kubectl-argo-rollouts-linux-amd64
+          sudo chmod +x /usr/local/bin/kubectl-argo-rollouts
+
+      - name: Set image tags in overlays/dev
+        env:
+          API_IMAGE:    ${{ needs.build.outputs.api-image }}
+          WORKER_IMAGE: ${{ needs.build.outputs.worker-image }}
+        working-directory: manifests/overlays/dev
+        run: |
+          # Split image:tag for kustomize edit set image.
+          API_NAME="${API_IMAGE%:*}";       API_TAG="${API_IMAGE##*:}"
+          WORKER_NAME="${WORKER_IMAGE%:*}"; WORKER_TAG="${WORKER_IMAGE##*:}"
+          kustomize edit set image \
+            "ulys/api=${API_NAME}:${API_TAG}" \
+            "ulys/worker=${WORKER_NAME}:${WORKER_TAG}"
+
+      - name: Render + apply manifests (envsubst for per-env values)
+        env:
+          PROJECT_ID:        ${{ vars.GCP_PROJECT_ID_DEV }}
+          API_LB_STATIC_IP:  ${{ steps.tfout.outputs.api_lb_static_ip }}
+          API_GSA_EMAIL:     ${{ steps.tfout.outputs.api_sa_email }}
+          WORKER_GSA_EMAIL:  ${{ steps.tfout.outputs.worker_sa_email }}
+          DB_HOST:           ${{ steps.tfout.outputs.db_private_ip }}
+          REDIS_ADDR:        ${{ steps.tfout.outputs.redis_host }}:${{ steps.tfout.outputs.redis_port }}
+        run: |
+          set -euo pipefail
+          kustomize build manifests/overlays/dev | envsubst | kubectl apply -f -
+
+      - name: Watch Rollout to completion (gate on Healthy)
+        id: rollout
+        run: |
+          # Exits 0 on Healthy, non-zero on Degraded / Aborted / timeout.
+          # Argo Rollouts auto-aborts on AnalysisRun failure → traffic
+          # stays on the stable revision; this command surfaces that as
+          # a failed job, which the brief calls the "automatic rollback".
+          kubectl argo rollouts status api -n "$NAMESPACE" --timeout 10m
+
+      - name: Smoke /readyz on public LB ×10 (post-promote sanity)
+        if: success()
+        env:
+          LB: ${{ steps.tfout.outputs.api_lb_static_ip }}
+        run: |
+          set -euo pipefail
+          echo "smoking http://${LB}/readyz"
+          for i in $(seq 1 10); do
+            code=$(curl -sk -o /dev/null -m 8 -w '%{http_code}' "http://${LB}/readyz" || echo 0)
+            echo "  attempt $i  →  $code"
+            [[ "$code" == "200" ]] || { echo "::error::public readyz returned $code"; exit 1; }
+            sleep 2
+          done
+
+      - name: Abort canary on failure (belt & suspenders; Rollouts auto-aborts already)
+        if: failure() && steps.rollout.outcome != 'success'
+        run: |
+          echo "::warning::canary failed; aborting rollout (Argo Rollouts has likely already done this)"
+          kubectl argo rollouts abort api -n "$NAMESPACE" || true
+          kubectl argo rollouts get rollout api -n "$NAMESPACE" || true
+          exit 1
+
+  deploy-web:
+    needs: [build, deploy]
+    if: success() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER_DEV }}
+          service_account: ${{ vars.DEPLOYER_SA_DEV }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+      - name: Read api LB static IP
+        id: ip
+        working-directory: infra/envs/dev
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ vars.GCP_PROJECT_ID_DEV }}-tf-state" \
+            -backend-config="prefix=envs/dev"
+          echo "lb=$(terraform output -raw api_lb_static_ip)" >> "$GITHUB_OUTPUT"
+      - name: Substitute API_URL into index.html
+        env:
+          API_URL: http://${{ steps.ip.outputs.lb }}
+        run: |
+          # Same tool as the kustomize-apply step (line ~182); the
+          # quoted variable list keeps envsubst from consuming any
+          # accidental ${...} that isn't API_URL.
+          tmp=$(mktemp)
+          envsubst '${API_URL}' < apps/web/index.html > "$tmp"
+          mv "$tmp" apps/web/index.html
+      - name: Upload to GCS
+        run: |
+          BUCKET="${{ vars.GCP_PROJECT_ID_DEV }}-web"
+          gcloud storage rsync apps/web "gs://$BUCKET" \
+            --recursive --cache-control="public, max-age=60"
+          echo "https://storage.googleapis.com/$BUCKET/index.html"

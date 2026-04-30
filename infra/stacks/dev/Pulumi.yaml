@@ -1,8 +1,0 @@
-name: ulys-dev
-runtime:
-  name: nodejs
-  options:
-    typescript: true
-description: dev environment — minimum-cost variant, single zonal cluster
-backend:
-  url: gs://ulys-dev-34490-pulumi-state

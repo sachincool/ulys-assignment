@@ -1,0 +1,13 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  - serviceaccounts.yaml
+  - secretproviderclass.yaml
+  - api-rollout.yaml
+  - api-service.yaml
+  - api-public.yaml
+  - worker.yaml
+  - networkpolicy.yaml
+  - analysistemplate.yaml

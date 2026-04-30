@@ -5,66 +5,101 @@ on:
     paths: ["infra/**", ".github/workflows/ci-infra.yml"]
   push:
     branches: [main]
-    paths: ["infra/**"]
+    paths: ["infra/**", ".github/workflows/ci-infra.yml"]
 
 permissions:
   contents: read
   id-token: write
   pull-requests: write
 
+env:
+  TF_VERSION: "1.7.5"
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+
 jobs:
-  preview:
+  fmt-validate:
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
-    strategy:
-      fail-fast: false
-      matrix:
-        env: [dev, staging, prod]
-    environment: ${{ matrix.env }}-preview
-    defaults: { run: { working-directory: infra } }
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: 20, cache: pnpm, cache-dependency-path: infra/pnpm-lock.yaml }
-      - uses: pnpm/action-setup@v3
-        with: { version: 9 }
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm tsc -p tsconfig.json --noEmit
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+      - run: terraform fmt -check -recursive
+        working-directory: infra
+      - run: terraform init -backend=false
+        working-directory: infra/envs/dev
+      - run: terraform validate
+        working-directory: infra/envs/dev
+      - run: terraform init -backend=false
+        working-directory: infra/bootstrap
+      - run: terraform validate
+        working-directory: infra/bootstrap
+
+  plan:
+    needs: fmt-validate
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    environment: dev
+    defaults: { run: { working-directory: infra/envs/dev } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
       - id: auth
         uses: google-github-actions/auth@v2
         with:
-          workload_identity_provider: ${{ vars[format('WIF_PROVIDER_{0}', matrix.env)] }}
-          service_account: ${{ vars[format('DEPLOYER_SA_{0}', matrix.env)] }}
-      - uses: pulumi/actions@v5
+          workload_identity_provider: ${{ vars.WIF_PROVIDER_DEV }}
+          service_account: ${{ vars.DEPLOYER_SA_DEV }}
+      - run: |
+          terraform init \
+            -backend-config="bucket=${{ vars.GCP_PROJECT_ID_DEV }}-tf-state" \
+            -backend-config="prefix=envs/dev"
+      - id: plan
+        run: |
+          set -o pipefail
+          terraform plan -no-color -out=tfplan \
+            -var "project=${{ vars.GCP_PROJECT_ID_DEV }}" \
+            -var "billing_account=${{ secrets.BILLING_ACCOUNT }}" \
+            -var "alert_email=${{ vars.ALERT_EMAIL }}" \
+            | tee plan.txt
+      - uses: actions/github-script@v7
+        if: always()
         with:
-          command: preview
-          stack-name: sachincool/${{ matrix.env }}
-          work-dir: infra/stacks/${{ matrix.env }}
-          comment-on-pr: true
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('infra/envs/dev/plan.txt', 'utf8');
+            const trimmed = body.length > 60000 ? body.slice(0, 60000) + "\n…(truncated)" : body;
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              body: "### Terraform plan — `envs/dev`\n\n```\n" + trimmed + "\n```",
+            });
 
   apply:
+    needs: fmt-validate
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    if: github.event_name == 'push'
-    strategy:
-      max-parallel: 1
-      matrix:
-        env: [dev, staging, prod]
-    environment: ${{ matrix.env }}        # GH Environment with prod approver
-    defaults: { run: { working-directory: infra } }
+    environment: dev
+    defaults: { run: { working-directory: infra/envs/dev } }
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: 20, cache: pnpm, cache-dependency-path: infra/pnpm-lock.yaml }
-      - uses: pnpm/action-setup@v3
-        with: { version: 9 }
-      - run: pnpm install --frozen-lockfile
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
       - id: auth
         uses: google-github-actions/auth@v2
         with:
-          workload_identity_provider: ${{ vars[format('WIF_PROVIDER_{0}', matrix.env)] }}
-          service_account: ${{ vars[format('DEPLOYER_SA_{0}', matrix.env)] }}
-      - uses: pulumi/actions@v5
-        with:
-          command: up
-          stack-name: sachincool/${{ matrix.env }}
-          work-dir: infra/stacks/${{ matrix.env }}
+          workload_identity_provider: ${{ vars.WIF_PROVIDER_DEV }}
+          service_account: ${{ vars.DEPLOYER_SA_DEV }}
+      - run: |
+          terraform init \
+            -backend-config="bucket=${{ vars.GCP_PROJECT_ID_DEV }}-tf-state" \
+            -backend-config="prefix=envs/dev"
+      - run: |
+          terraform apply -auto-approve \
+            -var "project=${{ vars.GCP_PROJECT_ID_DEV }}" \
+            -var "billing_account=${{ secrets.BILLING_ACCOUNT }}" \
+            -var "alert_email=${{ vars.ALERT_EMAIL }}"

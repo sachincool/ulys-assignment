@@ -1,8 +1,0 @@
-name: ulys-prod
-runtime:
-  name: nodejs
-  options:
-    typescript: true
-description: prod environment — regional control plane, HA Cloud SQL, BinAuthz on
-backend:
-  url: gs://ulys-prod-pulumi-state

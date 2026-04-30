@@ -1,7 +1,7 @@
 # ulys — plug-and-play spin up / spin down via just (https://just.systems)
 #
 # Pre-reqs (one-time on the operator's laptop):
-#   brew install just pulumi pnpm gcloud kubectl helm gh
+#   brew install just terraform pnpm gcloud kubectl helm gh kustomize
 #   gcloud auth login
 #   gcloud auth application-default login
 #
@@ -10,12 +10,8 @@
 #   just down PROJECT_ID=ulys-dev-XXXXX
 #
 # `up` orchestrates: GCP project create + billing → enable APIs → bootstrap
-# stack → env stack → install Argo CD root Application → wait for Healthy.
-# `down` runs `pulumi destroy` on the env stack and the bootstrap stack,
-# then `gcloud projects delete`.
-#
-# Everything else flows through GitOps: image bumps go via `ci-app.yml`,
-# manifest commits go via the manifest-bump PR, Argo CD reconciles.
+# stack → env stack → cluster credentials → install argo-rollouts + GSM CSI
+# → render + apply manifests → wait until Rollout is Healthy.
 
 set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 set positional-arguments
@@ -24,30 +20,25 @@ env             := env_var_or_default("ENV", "dev")
 project_id      := env_var_or_default("PROJECT_ID", "")
 billing_account := env_var_or_default("BILLING_ACCOUNT", "")
 github_repo     := env_var_or_default("GITHUB_REPO", "sachincool/ulys-assignment")
-manifest_repo   := env_var_or_default("MANIFEST_REPO", "sachincool/ulys-manifests")
 region          := env_var_or_default("REGION", "us-central1")
+alert_email     := env_var_or_default("ALERT_EMAIL", "")
 
-# Per-env stable passphrase. In CI, pull from Pulumi config env or a secret.
-export PULUMI_CONFIG_PASSPHRASE := "ulys-" + env + "-passphrase"
-
-# Default action: list available recipes
 default:
     @just --list --unsorted
 
-# Spin up a fresh env from scratch (project create → cluster ready → apps Healthy)
-up: bootstrap stack argocd verify
+# Spin up a fresh env from scratch
+up: bootstrap stack platform deploy verify
     @echo
-    @echo "✅ ulys-{{env}} is up. Argo CD is reconciling from {{manifest_repo}}."
-    @echo "   - Cluster:  $(cd infra/stacks/{{env}} && pulumi stack output clusterName)"
-    @echo "   - api LB:   http://$(kubectl -n ulys get svc api-public -o jsonpath='{.status.loadBalancer.ingress[0].ip}')"
-    @echo "   - argocd:   kubectl -n argocd port-forward svc/argo-cd-argocd-server 8080:80"
+    @echo "ulys-{{env}} is up."
+    @echo "  api:  http://$(cd infra/envs/{{env}} && terraform output -raw api_lb_static_ip)"
+    @echo "  web:  $(cd infra/envs/{{env}} && terraform output -raw web_url)"
 
-# Step 1: GCP project + billing + APIs + Pulumi bootstrap stack + GH vars
+# Step 1: GCP project + billing + APIs + Terraform bootstrap + GH vars
 bootstrap:
     #!/usr/bin/env bash
     set -euo pipefail
     : "${PROJECT_ID:={{project_id}}}"
-    [[ -n "${PROJECT_ID}" ]] || { echo "PROJECT_ID required (e.g., just bootstrap PROJECT_ID=ulys-dev-1)"; exit 1; }
+    [[ -n "${PROJECT_ID}" ]] || { echo "PROJECT_ID required"; exit 1; }
     : "${BILLING_ACCOUNT:={{billing_account}}}"
     [[ -n "${BILLING_ACCOUNT}" ]] || { echo "BILLING_ACCOUNT required"; exit 1; }
 
@@ -56,117 +47,171 @@ bootstrap:
       gcloud projects create "$PROJECT_ID" --name=ulys-{{env}}
     gcloud billing projects link "$PROJECT_ID" --billing-account="$BILLING_ACCOUNT" >/dev/null
     gcloud config set project "$PROJECT_ID" >/dev/null
-    gcloud auth application-default set-quota-project "$PROJECT_ID" 2>/dev/null || true
 
-    echo "==> enable APIs (one batch)"
+    echo "==> enable bootstrap-required APIs"
     gcloud services enable \
       iam.googleapis.com iamcredentials.googleapis.com \
       cloudresourcemanager.googleapis.com serviceusage.googleapis.com \
-      compute.googleapis.com container.googleapis.com \
-      sqladmin.googleapis.com redis.googleapis.com \
-      servicenetworking.googleapis.com artifactregistry.googleapis.com \
-      secretmanager.googleapis.com cloudkms.googleapis.com cloudbilling.googleapis.com \
-      storage.googleapis.com monitoring.googleapis.com logging.googleapis.com \
-      cloudtrace.googleapis.com binaryauthorization.googleapis.com containeranalysis.googleapis.com \
+      cloudbilling.googleapis.com billingbudgets.googleapis.com \
+      storage.googleapis.com \
       --project="$PROJECT_ID" >/dev/null
 
-    echo "==> infra/bootstrap (state bucket + WIF + curated deployer SA)"
-    (cd infra && pnpm install --silent)
-    (cd infra/bootstrap && \
-       (pulumi login file://./pulumi-state >/dev/null 2>&1 || true) && \
-       (pulumi stack select {{env}}-bootstrap >/dev/null 2>&1 || pulumi stack init {{env}}-bootstrap >/dev/null) && \
-       pulumi config set gcp:project "$PROJECT_ID" && \
-       pulumi config set gcp:region {{region}} && \
-       pulumi config set ulys-bootstrap:githubRepo {{github_repo}} && \
-       pulumi up --yes --skip-preview)
+    echo "==> point Application Default Credentials at $PROJECT_ID"
+    # Required: Terraform's google provider routes API calls through
+    # ADC's quota project. If ADC still points at a deleted project,
+    # downstream calls 403 even though the new project's IAM is fine.
+    gcloud auth application-default set-quota-project "$PROJECT_ID"
+
+    echo "==> wait 10s for project IAM propagation"
+    sleep 10
+
+    echo "==> infra/bootstrap (state bucket + WIF + deployer SA)"
+    cd infra/bootstrap
+    terraform init -upgrade
+    terraform apply -auto-approve \
+      -var "project=$PROJECT_ID" \
+      -var "region={{region}}" \
+      -var "env={{env}}" \
+      -var "github_repo={{github_repo}}"
+
+    echo "==> grant deployer SA roles/billing.user on the billing account"
+    DEPLOYER=$(terraform output -raw deployer_sa_email)
+    gcloud billing accounts add-iam-policy-binding "$BILLING_ACCOUNT" \
+      --member="serviceAccount:$DEPLOYER" \
+      --role="roles/billing.user" >/dev/null
 
     echo "==> wire GitHub Actions vars on {{github_repo}}"
-    WIF=$(cd infra/bootstrap && pulumi stack output wifProviderResource)
-    DEPLOYER=$(cd infra/bootstrap && pulumi stack output deployerSaEmail)
+    WIF=$(terraform output -raw wif_provider_resource)
     UPPER=$(echo "{{env}}" | tr '[:lower:]' '[:upper:]')
     gh variable set "GCP_PROJECT_ID_${UPPER}" -b "$PROJECT_ID" -R {{github_repo}}
     gh variable set "WIF_PROVIDER_${UPPER}"   -b "$WIF"        -R {{github_repo}}
     gh variable set "DEPLOYER_SA_${UPPER}"    -b "$DEPLOYER"   -R {{github_repo}}
     gh variable set GCP_REGION                 -b "{{region}}"  -R {{github_repo}} || true
+    if [[ -n "{{alert_email}}" ]]; then
+      gh variable set ALERT_EMAIL              -b "{{alert_email}}" -R {{github_repo}} || true
+    fi
+    gh secret set BILLING_ACCOUNT              -b "$BILLING_ACCOUNT" -R {{github_repo}} || true
 
-# Step 2: VPC + GKE + Cloud SQL + Memorystore + IAM (the env-specific stack)
+# Step 2: VPC + GKE Autopilot + Cloud SQL + Memorystore + AR + IAM + budget
 stack:
     #!/usr/bin/env bash
     set -euo pipefail
     : "${PROJECT_ID:={{project_id}}}"
     [[ -n "${PROJECT_ID}" ]] || { echo "PROJECT_ID required"; exit 1; }
+    : "${BILLING_ACCOUNT:={{billing_account}}}"
+    [[ -n "${BILLING_ACCOUNT}" ]] || { echo "BILLING_ACCOUNT required"; exit 1; }
 
-    echo "==> infra/stacks/{{env}} (cluster + DB + cache + IAM)"
-    cd infra/stacks/{{env}}
-    pulumi login "gs://${PROJECT_ID}-pulumi-state" >/dev/null
-    pulumi stack select {{env}} >/dev/null 2>&1 || pulumi stack init {{env}} >/dev/null
-    pulumi config set gcp:project "$PROJECT_ID"
-    pulumi config set gcp:region {{region}}
-    pulumi up --yes --skip-preview
+    cd infra/envs/{{env}}
+    terraform init \
+      -backend-config="bucket=${PROJECT_ID}-tf-state" \
+      -backend-config="prefix=envs/{{env}}" \
+      -upgrade
+    terraform apply -auto-approve \
+      -var "project=$PROJECT_ID" \
+      -var "region={{region}}" \
+      -var "billing_account=$BILLING_ACCOUNT" \
+      -var "alert_email={{alert_email}}"
 
-# Step 3: get cluster credentials, apply Argo CD root Application
-argocd:
+# Step 3: cluster creds + install argo-rollouts + Secrets Store CSI + GCP provider
+platform:
     #!/usr/bin/env bash
     set -euo pipefail
     : "${PROJECT_ID:={{project_id}}}"
-    [[ -n "${PROJECT_ID}" ]] || { echo "PROJECT_ID required"; exit 1; }
 
-    echo "==> kube credentials + Argo CD bootstrap"
-    CLUSTER_NAME=$(cd infra/stacks/{{env}} && pulumi stack output clusterName)
-    CLUSTER_LOC=$(cd infra/stacks/{{env}} && pulumi stack output clusterLocation)
+    echo "==> kube credentials"
+    CLUSTER_NAME=$(cd infra/envs/{{env}} && terraform output -raw cluster_name)
+    CLUSTER_LOC=$(cd infra/envs/{{env}} && terraform output -raw cluster_location)
     gcloud container clusters get-credentials "$CLUSTER_NAME" \
-      --location="$CLUSTER_LOC" --project="$PROJECT_ID" >/dev/null
-    kubectl apply -f https://raw.githubusercontent.com/{{manifest_repo}}/main/argocd-applications/root.yaml
-    kubectl apply -f https://raw.githubusercontent.com/{{manifest_repo}}/main/argocd-applications/platform-{{env}}.yaml
-    echo "Argo CD is reconciling. Run 'just verify' to wait until apps are Healthy."
+      --location="$CLUSTER_LOC" --project="$PROJECT_ID"
 
-# Step 4: wait for the per-env Application to reach Healthy (timeout 8m)
-verify:
-    @echo "==> waiting for apps-{{env}} Healthy (timeout 8m)"
-    kubectl -n argocd wait --for=jsonpath='{.status.health.status}'=Healthy application/apps-{{env}} --timeout=8m
+    echo "==> Argo Rollouts (canary controller)"
+    helm repo add argo https://argoproj.github.io/argo-helm >/dev/null 2>&1 || true
+    helm repo update >/dev/null
+    helm upgrade --install argo-rollouts argo/argo-rollouts \
+      --namespace argo-rollouts --create-namespace \
+      --set installCRDs=true \
+      --wait --timeout 5m
 
-# Tear it all back down: env stack → bootstrap → project delete
-down:
+    echo "==> enable GKE-managed Secret Manager add-on (replaces helm install)"
+    # Autopilot forbids helm installs into kube-system, so we use the managed
+    # add-on. The flag is idempotent. Once GA in google provider v6, this
+    # should move into the cluster resource.
+    gcloud container clusters update "$CLUSTER_NAME" \
+      --location="$CLUSTER_LOC" --project="$PROJECT_ID" \
+      --enable-secret-manager
+    kubectl get crd secretproviderclasses.secrets-store.csi.x-k8s.io -o name
+
+# Step 4: render + apply manifests (kustomize + envsubst), trigger initial rollout
+deploy:
     #!/usr/bin/env bash
-    set -uo pipefail   # keep going on individual destroy errors
+    set -euo pipefail
     : "${PROJECT_ID:={{project_id}}}"
-    [[ -n "${PROJECT_ID}" ]] || { echo "PROJECT_ID required"; exit 1; }
 
-    echo "==> tear down env stack ({{env}})"
-    (cd infra/stacks/{{env}} && pulumi destroy --yes --skip-preview) || true
+    cd infra/envs/{{env}}
+    export PROJECT_ID
+    export API_LB_STATIC_IP=$(terraform output -raw api_lb_static_ip)
+    export API_GSA_EMAIL=$(terraform output -raw api_sa_email)
+    export WORKER_GSA_EMAIL=$(terraform output -raw worker_sa_email)
+    export DB_HOST=$(terraform output -raw db_private_ip)
+    export REDIS_ADDR="$(terraform output -raw redis_host):$(terraform output -raw redis_port)"
+    cd ../../..
 
-    echo "==> tear down bootstrap"
-    (cd infra/bootstrap && pulumi stack select {{env}}-bootstrap >/dev/null 2>&1 && \
-       pulumi destroy --yes --skip-preview) || true
+    # First-time deploy uses placeholder image refs (TF doesn't push images).
+    # CI does the real digest bumps; for local `just up` the placeholders
+    # are deliberately invalid so the Rollout sits in `Progressing` until
+    # `ci-app.yml` runs against this cluster.
+    kustomize build manifests/overlays/{{env}} | envsubst | kubectl apply -f -
 
-    echo "==> delete project (immediate billing stop, 30d undelete window)"
-    gcloud projects delete "$PROJECT_ID" --quiet || true
-
-# Quick checks against the live cluster (use after `just up`)
-status:
-    @echo "=== applications ==="
-    @kubectl -n argocd get applications 2>/dev/null || echo "(no cluster context)"
-    @echo
-    @echo "=== ulys workloads ==="
-    @kubectl -n ulys get rollout,svc,pods 2>/dev/null || true
-    @echo
-    @echo "=== api LB IP ==="
-    @kubectl -n ulys get svc api-public -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null && echo "" || echo "n/a"
+# Step 5: wait for Rollout to reach Healthy (timeout 10m)
+verify:
+    @echo "==> waiting for Rollout/api to be Healthy (timeout 10m)"
+    kubectl argo rollouts status api -n ulys --timeout 10m
 
 # Smoke against the live LB
 smoke:
     #!/usr/bin/env bash
     set -euo pipefail
-    LB=$(kubectl -n ulys get svc api-public -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
-    [[ -n "$LB" ]] || { echo "no LB IP yet"; exit 1; }
+    LB=$(cd infra/envs/{{env}} && terraform output -raw api_lb_static_ip)
+    [[ -n "$LB" ]] || { echo "no LB IP"; exit 1; }
     echo "LB: http://$LB"
     for p in /livez /healthz /readyz /version /work; do
       code=$(curl -sk -o /dev/null -m 8 -w '%{http_code}' "http://$LB$p" || echo 0)
       echo "  $p -> $code"
     done
 
-# Local cleanup (drop pnpm + Pulumi state caches)
+# Tear it all back down: env → bootstrap → project delete
+down:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    : "${PROJECT_ID:={{project_id}}}"
+    [[ -n "${PROJECT_ID}" ]] || { echo "PROJECT_ID required"; exit 1; }
+
+    echo "==> tear down env stack ({{env}})"
+    (cd infra/envs/{{env}} && terraform destroy -auto-approve \
+      -var "project=$PROJECT_ID" \
+      -var "region={{region}}" \
+      -var "billing_account=${BILLING_ACCOUNT:-unused-on-destroy}" \
+      -var "alert_email={{alert_email}}") || true
+
+    echo "==> tear down bootstrap"
+    (cd infra/bootstrap && terraform destroy -auto-approve \
+      -var "project=$PROJECT_ID" \
+      -var "region={{region}}" \
+      -var "env={{env}}" \
+      -var "github_repo={{github_repo}}") || true
+
+    echo "==> delete project (immediate billing stop, 30d undelete window)"
+    gcloud projects delete "$PROJECT_ID" --quiet || true
+
+# Quick cluster snapshot
+status:
+    @echo "=== rollout ==="
+    @kubectl argo rollouts get rollout api -n ulys 2>/dev/null || echo "(no cluster)"
+    @echo
+    @echo "=== ulys workloads ==="
+    @kubectl -n ulys get rollout,deploy,svc,pods 2>/dev/null || true
+
+# Local cleanup
 clean:
-    rm -rf infra/node_modules
-    rm -rf infra/bootstrap/pulumi-state
-    rm -rf infra/bootstrap/.pulumi infra/stacks/*/.pulumi
+    rm -rf infra/bootstrap/.terraform infra/bootstrap/terraform.tfstate*
+    rm -rf infra/envs/{{env}}/.terraform infra/envs/{{env}}/.terraform.lock.hcl

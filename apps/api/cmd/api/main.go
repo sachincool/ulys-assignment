@@ -14,6 +14,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/redis/go-redis/v9"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"google.golang.org/api/idtoken"
 
 	"github.com/sachincool/ulys/apps/api/internal/db"
 	"github.com/sachincool/ulys/apps/api/internal/server"
@@ -23,10 +24,7 @@ import (
 const serviceName = "api"
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
-		AddSource: false,
-	}))
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
 
 	gitSHA := envOr("GIT_SHA", "unknown")
@@ -35,9 +33,6 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 
-	// OTel: only init if a collector endpoint is reachable. Skipping is the
-	// safe default when the collector isn't yet deployed (e.g., dev). We
-	// don't block the api startup on tracing.
 	shutdownTraces := func(context.Context) error { return nil }
 	if os.Getenv("OTEL_ENABLE") == "true" {
 		s, err := telemetry.Init(ctx, serviceName, gitSHA)
@@ -66,15 +61,33 @@ func main() {
 
 	rdb := redis.NewClient(&redis.Options{
 		Addr:     envOr("REDIS_ADDR", "localhost:6379"),
-		Password: os.Getenv("REDIS_PASSWORD"), // empty in dev
+		Password: os.Getenv("REDIS_PASSWORD"),
 	})
 	defer rdb.Close()
+
+	workerURL := envOr("WORKER_URL", "")
+	if workerURL == "" {
+		logger.Error("WORKER_URL is empty — refusing to start")
+		os.Exit(1)
+	}
+
+	// idtoken.NewClient returns an *http.Client that attaches a Google
+	// ID token (audience = workerURL) to every request, refreshed
+	// automatically. On Cloud Run / GKE / GCE this picks up the runtime
+	// service account from the metadata server. Locally it falls back
+	// to GOOGLE_APPLICATION_CREDENTIALS.
+	workerClient, err := idtoken.NewClient(ctx, workerURL)
+	if err != nil {
+		logger.Error("idtoken client", "err", err, "audience", workerURL)
+		os.Exit(1)
+	}
+	workerClient.Timeout = 5 * time.Second
 
 	srv := &server.Server{
 		DB:           pool,
 		Redis:        rdb,
-		WorkerClient: &http.Client{Timeout: 5 * time.Second},
-		WorkerURL:    envOr("WORKER_URL", "http://worker.ulys.svc.cluster.local"),
+		WorkerClient: workerClient,
+		WorkerURL:    workerURL,
 		GitSHA:       gitSHA,
 		BuildTime:    buildTime,
 		Logger:       logger,
@@ -87,14 +100,11 @@ func main() {
 	r.Use(slogRequestLogger(logger))
 	r.Use(corsAllowAll)
 
-	// /healthz mirrors /livez — both return 200 OK from the same handler.
-	// The mesh + K8s probes target /livez; /healthz is here for the
-	// assignment-spec contract and any platform that reserves /livez.
 	r.Get("/healthz", srv.Healthz)
-	r.Get("/livez",   srv.Livez)
-	r.Get("/readyz",  srv.Readyz)
+	r.Get("/livez", srv.Livez)
+	r.Get("/readyz", srv.Readyz)
 	r.Get("/version", srv.Version)
-	r.Get("/work",    srv.Work)
+	r.Get("/work", srv.Work)
 
 	port := envOr("PORT", "8080")
 	httpSrv := &http.Server{
@@ -107,7 +117,7 @@ func main() {
 	}
 
 	go func() {
-		logger.Info("api listening", "port", port, "sha", gitSHA)
+		logger.Info("api listening", "port", port, "sha", gitSHA, "worker", workerURL)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("listen", "err", err)
 			cancel()
@@ -141,16 +151,15 @@ func slogRequestLogger(logger *slog.Logger) func(http.Handler) http.Handler {
 			start := time.Now()
 			ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
 			next.ServeHTTP(ww, r)
-			dur := time.Since(start)
 			if r.URL.Path == "/livez" || r.URL.Path == "/healthz" {
-				return // suppress probe noise
+				return
 			}
 			logger.LogAttrs(r.Context(), slog.LevelInfo, "request",
 				slog.String("method", r.Method),
 				slog.String("path", r.URL.Path),
 				slog.Int("status", ww.Status()),
 				slog.Int("bytes", ww.BytesWritten()),
-				slog.Duration("dur", dur),
+				slog.Duration("dur", time.Since(start)),
 				slog.String("req_id", middleware.GetReqID(r.Context())),
 			)
 		})

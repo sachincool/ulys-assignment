@@ -1,0 +1,63 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+  namespace: ulys
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels: { app: worker }
+  strategy:
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
+  template:
+    metadata:
+      labels: { app: worker }
+    spec:
+      serviceAccountName: worker
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: worker
+          image: ulys/worker
+          ports:
+            - containerPort: 8080
+          env:
+            # JWT validation config — worker rejects any /transform call
+            # without `Authorization: Bearer <jwt>` whose `aud` matches
+            # WORKER_AUDIENCE and whose `email` claim equals API_SA_EMAIL.
+            - name: WORKER_AUDIENCE
+              value: http://worker.ulys.svc.cluster.local
+            - name: API_SA_EMAIL
+              value: ${API_GSA_EMAIL}
+          resources:
+            requests: { cpu: 50m,  memory: 64Mi }
+            limits:   { cpu: 250m, memory: 128Mi }
+          startupProbe:
+            httpGet: { path: /livez, port: 8080 }
+            failureThreshold: 30
+            periodSeconds: 2
+          livenessProbe:
+            httpGet: { path: /livez, port: 8080 }
+            periodSeconds: 10
+          readinessProbe:
+            httpGet: { path: /livez, port: 8080 }
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: worker
+  namespace: ulys
+spec:
+  type: ClusterIP
+  selector: { app: worker }
+  ports:
+    - port: 80
+      targetPort: 8080

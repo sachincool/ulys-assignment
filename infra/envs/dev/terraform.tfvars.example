@@ -1,0 +1,5 @@
+project         = "ulys-dev-XXXXX"
+region          = "us-central1"
+zone            = "us-central1-a"
+billing_account = "01XXXX-XXXXXX-XXXXXX"
+alert_email     = ""

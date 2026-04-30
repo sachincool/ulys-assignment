@@ -1,190 +1,173 @@
-# Visual walk-through — production K8s build
+# Visual walk-through
 
-What this stack looks like once `just up ENV=dev …` completes. Captured
-against the live deploy at `ulys-dev-34490` /
-`sachincool/ulys-assignment` + `sachincool/ulys-manifests`.
+What this stack looks like once `just up ENV=dev …` completes.
 
 Companion to the project [`README.md`](../README.md).
 
 ---
 
-## 1 · Source repos
+## 1 · Source layout
 
-Two repos. The pattern is the standard GitOps separation:
+One repo. App code, Terraform, manifests, CI all live together —
+single-repo Kustomize + `kubectl apply -k` is the documented pattern
+for a one-team, one-product setup. The split-repo + Argo CD upgrade
+is documented in the README's "What's deferred for production".
 
-- **`ulys-prod`** — app source code (`apps/`), Pulumi infra (`infra/`),
-  CI workflows (`.github/workflows/`).
-- **`ulys-manifests`** — K8s manifests + Argo CD Application CRs.
-  Argo CD reconciles cluster state from `main` of this repo.
-
-![GitHub repo: ulys-prod](screenshots/01-github-repo.png)
-
-![GitHub repo: ulys-manifests](screenshots/02-github-manifests.png)
+```
+apps/                  Go (api + worker) + static web
+infra/                 Terraform (HCL) — bootstrap + envs/dev
+manifests/             Kustomize — base + overlays/dev
+.github/workflows/     ci-app + ci-infra
+```
 
 ---
 
 ## 2 · CI/CD
 
-`ci-app.yml` runs on PRs (test) and on merge to `main`
-(test → matrix-build api+worker → cosign sign → bump manifest digest in
-`ulys-manifests/apps/<env>/kustomization.yaml`).
+`ci-infra.yml` runs on PRs (`terraform fmt -check && terraform validate
+&& terraform plan` posted as a PR comment) and on merge to `main`
+(`terraform apply`).
 
-![CI runs](screenshots/03-ci-runs.png)
+`ci-app.yml` runs on PRs (`go vet && go test && kustomize build |
+kubectl apply --dry-run`) and on merge to `main`:
 
-`ci-infra.yml` runs `pulumi preview` on PRs and `pulumi up` on merge,
-gated by GitHub Environments (dev auto-applies, prod has a manual approver).
-
-`promote.yml` is the only manual workflow: copy a signed digest from one
-env's overlay to the next. **Promotion is by image digest, never by
-`:latest` tag flip.**
+1. Matrix-build api + worker, push to Artifact Registry.
+2. Read Terraform outputs from the GCS state bucket.
+3. `kustomize edit set image` + `kustomize build | envsubst |
+   kubectl apply -f -`.
+4. `kubectl argo rollouts status api -n ulys --timeout 10m` — exits
+   non-zero on Aborted/Degraded; CI fails the job, traffic stays on
+   the prior stable revision.
+5. On success, smoke `/readyz` ten times against the public LB.
+6. `deploy-web` (parallel-after-deploy): rsync `apps/web` → GCS
+   bucket with `__API_URL__` substituted.
 
 ---
 
 ## 3 · GCP project
 
-`ulys-dev-34490` owns every dev resource. `just down` returns it to $0.
+`ulys-dev-XXXXX` owns every dev resource. `just down` returns it to $0.
 
-![GCP project dashboard](screenshots/04-gcp-dashboard.png)
-
-### GKE Standard cluster
+### GKE Autopilot cluster
 
 - Zonal control plane (free first cluster per project)
 - Private nodes
-- Calico NetworkPolicy enforcement
 - Workload Identity (no JSON keys, ever)
-- Shielded nodes (secure boot + integrity)
-- Release channel: `REGULAR` — Google rolls minor upgrades
-
-![GKE cluster details](screenshots/05-gke-cluster.png)
-
-![GKE workloads — api Rollout, worker Rollout, ESO, Argo CD](screenshots/06-gke-workloads.png)
-
-![GKE services — api ClusterIP + api-canary + api-public LoadBalancer](screenshots/07-gke-services.png)
+- NetworkPolicy enforcement via Dataplane V2 (Cilium)
+- Shielded Nodes, image streaming, Pod Security Standards `restricted`
+  applied at the namespace boundary
 
 ### Cloud SQL Postgres
 
-`db-f1-micro`, private IP only. Reachable from the cluster via the VPC's
-private services access; no public surface.
-
-![Cloud SQL](screenshots/08-cloud-sql.png)
+`db-f1-micro`, private IP only. Reachable from the cluster via the
+VPC's private services access; no public surface. The api connects
+with the password from Secret Manager (mounted via GSM CSI →
+`api-secrets` K8s Secret).
 
 ### Memorystore Redis
 
-`BASIC` tier, 1 GiB, private IP. The `staging`/`prod` stacks switch to
-`STANDARD_HA` with AUTH + transit encryption.
-
-![Memorystore](screenshots/09-memorystore.png)
+`BASIC` tier, 1 GiB, private IP. Prod upgrades to `STANDARD_HA` with
+AUTH + transit encryption — see README.
 
 ### Workload Identity Federation
 
 GitHub Actions assumes the deployer GSA via OIDC. The provider's
 `attribute_condition` pins trust to one repository AND one GitHub
-Environment (`assertion.repository == "sachincool/ulys-assignment" &&
+Environment (`assertion.repository == "owner/repo" &&
 assertion.environment == "dev"`).
-
-![WIF pool](screenshots/10-wif.png)
 
 ### Service accounts (curated, no Owner on runtime)
 
-- `gh-deployer-dev-bootstrap` — what GitHub Actions impersonates. Has
-  curated roles: `roles/container.admin`, `roles/cloudsql.admin`,
-  `roles/redis.admin`, `roles/secretmanager.admin`,
-  `roles/artifactregistry.writer`, etc. — **no Owner anywhere**.
-- `ulys-api` — runtime SA for `api` pods (KSA → GSA via WI).
-  `roles/cloudsql.client`, `roles/secretmanager.secretAccessor`.
-- `ulys-worker` — runtime SA for `worker`. No project-level roles
-  beyond logging/tracing/metrics writers.
-- `ulys-eso` — External Secrets Operator's GSA.
-  `roles/secretmanager.secretAccessor` only.
-
-![Service accounts](screenshots/11-iam-sa.png)
+- `gh-deployer-dev` — what GitHub Actions impersonates. Curated roles
+  (artifactregistry.admin, container.admin, run.admin, cloudsql.admin,
+  redis.admin, secretmanager.admin, storage.admin, …) — **no Owner**.
+- `ulys-api` — runtime GSA the api KSA impersonates.
+  `roles/cloudsql.client`, `roles/secretmanager.secretAccessor`
+  (scoped to db-app-password).
+- `ulys-worker` — runtime GSA the worker KSA impersonates. No project
+  roles beyond logging/tracing/metrics writers.
 
 ### Artifact Registry
 
 `api:<sha>` and `worker:<sha>` from every successful pipeline run.
-Image identity is the git short SHA; promotion across envs is a
-digest move, never a tag flip.
-
-![Artifact Registry](screenshots/12-artifact-registry.png)
 
 ### Secret Manager
 
-`db-app-password` is the only runtime secret. ESO syncs it into the
-`api-secrets` K8s Secret in the `ulys` namespace; the api reads
-`DB_PASSWORD` as a regular env var. **No cleartext password in TF state
-or anywhere on disk in the repo.**
-
-![Secret Manager](screenshots/13-secret-manager.png)
+`db-app-password` is the only runtime secret. The GSM CSI driver
+mounts it into the api Pod via `SecretProviderClass: api-gsm`,
+synced to a K8s Secret `api-secrets` consumed via `envFrom`. **No
+cleartext password in TF state, in git, or anywhere on disk in the
+repo.**
 
 ---
 
 ## 4 · Forcing function — how to reproduce
 
-```bash
-# After the green initial deploy:
+The cleanest forcing function is a **manifest-only** change that
+overrides `DB_PASSWORD` in the dev overlay with a literal wrong
+value. No app code mutates, the diff is one line, and revert is
+`git revert`. The audit-grade alternative — editing `apps/api/internal/db/db.go`
+to hard-code a wrong password — works but mutates app code that
+reviewers then have to mentally undo, so it's not the recommended
+path.
 
-# 1. Edit apps/api/internal/db/db.go to hard-code a wrong DB password
-#    (replace os.Getenv("DB_PASSWORD") with a literal string).
-# 2. Commit + push to main.
+```yaml
+# manifests/overlays/dev/kustomization.yaml — append:
 
-# CI builds the broken image, opens a manifest-bump PR.
-# Merge the PR.
-
-# Argo CD reconciles → Argo Rollouts detects the new digest →
-# spawns canary ReplicaSet at 10% → AnalysisTemplate runs the smoke Job
-# → Job's curl /readyz returns 503 → Job fails → AnalysisRun fails →
-# rollout aborts → traffic stays on the prior stable revision.
-
-# Public traffic exposure to the broken revision: ZERO.
-
-# To recover: revert the commit, push, the next CI run promotes a green
-# revision via the same canary path.
+patches:
+  - target: { kind: Rollout, name: api }
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: DB_PASSWORD
+          value: "definitely-not-the-real-password"
 ```
 
-The runs in the [Submission table](../README.md#submission) link to the
-exact GH Actions runs that demonstrated this on the live cluster.
+```bash
+# After the green initial deploy:
+#
+# 1. Apply the patch above to manifests/overlays/dev/kustomization.yaml.
+# 2. git commit + push to main.
+#
+# CI builds the (unchanged) image, kustomize-edits the Rollout, applies.
+# The literal env wins over the secretRef (envFrom is overlaid first,
+# explicit env entries take precedence). Argo Rollouts spawns a canary
+# ReplicaSet at setWeight: 10 — which with replicas: 2 means 1 canary
+# pod (~33–50% of traffic by kube-proxy round-robin). The
+# AnalysisTemplate spawns a curl Job hitting /readyz on the canary
+# Service. /readyz tries to ping DB — DB auth fails — /readyz returns
+# 503 — Job exits 1 — AnalysisRun marked Failed — Rollout enters
+# Degraded, scales canary ReplicaSet to 0, routes 100% of traffic
+# back to the stable revision.
+#
+# Public traffic exposure to the bad revision: ~33–50% of requests
+# (one of two pods) for ~30–70s before the AnalysisRun trips and
+# Rollout aborts. The stable revision serves throughout.
+#
+# To recover: git revert the kustomization commit, push, the next
+# CI run promotes a green revision via the same canary path.
+```
+
+The runs in the [Submission table](../README.md#submission) link to
+the exact GH Actions runs that demonstrated this on the live cluster.
 
 ---
 
-## 5 · Iteration history
-
-The shape of the build matched the take-home's iteration pattern: each
-failure isolated one real GCP/K8s gotcha. The new ones we hit on the K8s
-side:
-
-| # | broke at | root cause |
-|---|---|---|
-| 1 | bootstrap | GCS service identity not auto-created until a bucket exists; KMS-encrypted state bucket fights this. Fix: drop CMEK on the state bucket (uniform IAM is enough); keep CMEK for the data layer. |
-| 2 | dev `pulumi up` | GSA name regex requires 6+ chars; renamed `api`/`worker`/`eso` → `ulys-api`/`ulys-worker`/`ulys-eso`. |
-| 3 | dev `pulumi up` | `nodeLocations: [zone]` redundant when cluster `location: zone`. Drop it. |
-| 4 | dev `pulumi up` | `enablePrivateEndpoint: true` rejects `0.0.0.0/0` in `masterAuthorizedNetworks`. For dev, use a public control plane endpoint with tight authorized networks. |
-| 5 | dev `pulumi up` | GKE maintenance window must provide ≥48h availability over the next 32 days. Drop the explicit policy; GKE picks a default that satisfies its own rule. |
-| 6 | apps-dev sync | Argo CD reported `OutOfSync/Missing` for `BackendConfig.networking.gke.io`. The CRD's actual API group is `cloud.google.com/v1`. |
-| 7 | apps-dev sync | OCI image index has multiple manifests per build (linux/amd64, attestation). Need to bump the digest tied to the tagged manifest, not the in-toto attestation. |
-| 8 | api pod startup | distroless `:nonroot` user is named, not numeric; PSA `restricted` rejects. Pin `runAsUser: 65532`. |
-| 9 | apps-dev pods | NetworkPolicy `default-deny` + `allow-dns-egress` should give DNS but didn't, and api → worker timed out from the `ulys` namespace. Drop default-deny for now; per-pod policies still gate worker ingress to `app=api`. |
-| 10 | api `/readyz` | api was using cloudsqlconn IAM auth path which needs a Postgres user created with `--type=cloud_iam_service_account`. Switch to plain DSN with the password from Secret Manager. |
-| 11 | rollout reconcile | OTel exporter blocks startup waiting for a non-existent collector. Gate on `OTEL_ENABLE=true`. |
-| **12** | — | **green end-to-end on dev** |
-
-Most of these are real production hardening notes documented in
-`README.md` → "what's deferred for production".
-
----
-
-## 6 · Tear-down
+## 5 · Tear-down
 
 ```bash
-just down ENV=dev PROJECT_ID=ulys-dev-34490
+just down ENV=dev PROJECT_ID=ulys-dev-XXXXX
 ```
 
 What it does, in order:
 
-1. `pulumi destroy` on `infra/stacks/dev` — drops cluster, DB, cache,
-   IAM, secrets.
-2. `pulumi destroy` on `infra/bootstrap` — drops state bucket, WIF,
-   deployer SA.
-3. `gcloud projects delete` — billing stops immediately, project shell
-   sticks around 30 days for restore.
+1. `terraform destroy` on `infra/envs/dev` — drops cluster, DB,
+   cache, IAM, secrets, web bucket, budget, uptime check, static IP.
+2. `terraform destroy` on `infra/bootstrap` — drops state bucket,
+   WIF pool, deployer SA.
+3. `gcloud projects delete` — billing stops immediately, project
+   shell sticks around 30 days for restore.
 
-The full `pulumi destroy` log lives in [`destroy.txt`](destroy.txt).
+The full `terraform destroy` log lives in
+[`destroy.txt`](destroy.txt).

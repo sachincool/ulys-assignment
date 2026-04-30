@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ulys — web</title>
+  <style>
+    :root { color-scheme: dark; }
+    body {
+      font-family: ui-monospace, Menlo, Consolas, monospace;
+      background: #0b1020; color: #e6e8ee;
+      max-width: 720px; margin: 4rem auto; padding: 0 1rem;
+    }
+    h1 { font-size: 1.25rem; color: #6ee7b7; margin: 0 0 0.5rem; }
+    .meta { color: #9ca3af; font-size: 0.85rem; margin-bottom: 2rem; }
+    button {
+      background: #6ee7b7; color: #0b1020; border: 0; padding: 0.6rem 1rem;
+      border-radius: 6px; font: inherit; cursor: pointer;
+    }
+    button:disabled { opacity: 0.5; cursor: progress; }
+    pre {
+      background: #0f172a; border: 1px solid #1f2937; padding: 1rem;
+      border-radius: 6px; overflow-x: auto; margin-top: 1rem;
+    }
+    .err { color: #fca5a5; }
+    .ok  { color: #6ee7b7; }
+  </style>
+</head>
+<body>
+  <h1>ulys / web</h1>
+  <p class="meta">
+    Static site served from a public GCS bucket. Calls
+    <code id="api-url"></code> on click; api writes to Postgres, caches in
+    Redis, calls worker, returns combined response.
+  </p>
+
+  <button id="go">GET /work</button>
+  <pre id="out">click the button</pre>
+
+  <script>
+    // CI replaces ${API_URL} at deploy time with the api LoadBalancer's
+    // static external IP (`terraform output -raw api_lb_static_ip`),
+    // pinned via Service/api-public.spec.loadBalancerIP so the URL is
+    // stable across pod cycles. Substitution uses `envsubst` — same
+    // tool the kustomize-apply step uses for manifests, so the build
+    // toolchain is one tool, not two. For local viewing (the literal
+    // `${API_URL}` is still in the file), fall back to same-origin.
+    //
+    // Production-upgrade path (see README "What's deferred for
+    // production"): global HTTPS LB + Cloud Armor + managed cert on a
+    // custom domain replaces the L4 LB + raw IP; ${API_URL} becomes
+    // `https://api.<domain>`.
+    const API_URL = "${API_URL}".startsWith("$")
+      ? window.location.origin
+      : "${API_URL}";
+    document.getElementById("api-url").textContent = API_URL + "/work";
+
+    const btn = document.getElementById("go");
+    const out = document.getElementById("out");
+
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      out.className = "";
+      out.textContent = "loading…";
+      const t0 = performance.now();
+      try {
+        const r = await fetch(API_URL + "/work", { method: "GET" });
+        const ms = (performance.now() - t0).toFixed(0);
+        const body = await r.text();
+        out.className = r.ok ? "ok" : "err";
+        out.textContent =
+          `HTTP ${r.status}  ${ms} ms\n\n` +
+          (() => { try { return JSON.stringify(JSON.parse(body), null, 2); }
+                   catch { return body; } })();
+      } catch (e) {
+        out.className = "err";
+        out.textContent = "network error: " + e.message;
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

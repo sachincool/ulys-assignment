@@ -1,10 +1,28 @@
-node_modules/
-.pulumi/
-pulumi-state/
+.DS_Store
 .vscode/
 .idea/
-.DS_Store
 *.local
 *.log
 out/
 bin/
+
+# Terraform
+.terraform/
+# .terraform.lock.hcl is intentionally NOT ignored — provider lock files
+# are meant to be committed so `terraform init` resolves identical
+# provider versions for every developer + CI run, and Renovate can open
+# PRs to bump them. See https://developer.hashicorp.com/terraform/language/files/dependency-lock
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log
+crash.*.log
+
+# Node (defensive — left over from the Pulumi era; keeps any future
+# JS tooling from accidentally polluting the tree)
+node_modules/
+
+# Go build artifacts
+apps/*/api
+apps/*/worker

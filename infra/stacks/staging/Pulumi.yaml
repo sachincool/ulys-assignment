@@ -1,8 +1,0 @@
-name: ulys-staging
-runtime:
-  name: nodejs
-  options:
-    typescript: true
-description: staging environment
-backend:
-  url: gs://ulys-staging-pulumi-state

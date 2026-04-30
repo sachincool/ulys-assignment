@@ -29,9 +29,6 @@ func (s *Server) Healthz(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte("ok"))
 }
 
-// Livez is the K8s startupProbe / livenessProbe target. Identical to
-// /healthz — the duplication exists for spec compatibility with platforms
-// (like Cloud Run) that reserve /healthz at the edge.
 func (s *Server) Livez(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte("ok"))
 }
@@ -95,9 +92,23 @@ func (s *Server) Work(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// callWorker hits the worker via the in-cluster ClusterIP service. mTLS and
-// identity are handled by the service mesh (Linkerd) — we don't mint Google
-// ID tokens any more.
+// callWorker hits the worker via its in-cluster Service URL
+// (http://worker.ulys.svc.cluster.local). Authentication is handled by
+// `s.WorkerClient`, which is built with `idtoken.NewClient` in main.go —
+// it transparently attaches a Google ID token (audience = WorkerURL,
+// identity = the api KSA via Workload Identity) to every request,
+// refreshed automatically. The worker's requireGoogleIDToken middleware
+// validates signature + aud + email against Google JWKs; NetworkPolicy
+// is the second, network-layer block.
+//
+// Production-upgrade path (see README "What's deferred for production"):
+//   - Linkerd injection for mTLS at the transport layer; the ID-token
+//     check stays as the application-layer signal that survives a mesh
+//     outage.
+//   - If worker ever moves to Cloud Run for burst fan-out, this call
+//     site is unchanged: idtoken.NewClient already targets the audience
+//     URL, and Cloud Run's front door enforces roles/run.invoker on the
+//     api GSA exactly the same way.
 func (s *Server) callWorker(ctx context.Context, path string, body []byte) ([]byte, error) {
 	method := http.MethodGet
 	var reader io.Reader
@@ -112,6 +123,7 @@ func (s *Server) callWorker(ctx context.Context, path string, body []byte) ([]by
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+
 	resp, err := s.WorkerClient.Do(req)
 	if err != nil {
 		return nil, err

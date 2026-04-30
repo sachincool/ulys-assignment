@@ -1,0 +1,4 @@
+project     = "ulys-dev-XXXXX"
+region      = "us-central1"
+env         = "dev"
+github_repo = "owner/repo"

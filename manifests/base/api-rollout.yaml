@@ -1,0 +1,92 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: api
+  namespace: ulys
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels: { app: api }
+  strategy:
+    canary:
+      canaryService: api-canary
+      stableService: api
+      maxSurge: 1
+      maxUnavailable: 0
+      steps:
+        - setWeight: 10
+        - pause: { duration: 30s }
+        - analysis:
+            templates:
+              - templateName: readyz-probe
+            args:
+              - name: target-service
+                value: api-canary.ulys.svc.cluster.local
+        - setWeight: 50
+        - pause: { duration: 30s }
+        - analysis:
+            templates:
+              - templateName: readyz-probe
+            args:
+              - name: target-service
+                value: api-canary.ulys.svc.cluster.local
+        - setWeight: 100
+  template:
+    metadata:
+      labels: { app: api }
+    spec:
+      serviceAccountName: api
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: api
+          image: ulys/api
+          ports:
+            - containerPort: 8080
+          env:
+            - name: DB_HOST
+              value: ${DB_HOST}
+            - name: DB_USER
+              value: app
+            - name: DB_NAME
+              value: app
+            - name: REDIS_ADDR
+              value: ${REDIS_ADDR}
+            - name: WORKER_URL
+              value: http://worker.ulys.svc.cluster.local
+          envFrom:
+            - secretRef:
+                name: api-secrets
+          volumeMounts:
+            - name: gsm
+              mountPath: /var/run/secrets/gsm
+              readOnly: true
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits:   { cpu: 500m, memory: 256Mi }
+          startupProbe:
+            httpGet: { path: /livez, port: 8080 }
+            failureThreshold: 30
+            periodSeconds: 2
+          livenessProbe:
+            httpGet: { path: /livez, port: 8080 }
+            periodSeconds: 10
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8080 }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+      volumes:
+        - name: gsm
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: api-gsm

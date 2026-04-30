@@ -1,0 +1,48 @@
+# Argo Rollouts AnalysisTemplate. Hits `/readyz` on the canary Service
+# every 10s for ~30s; canary aborts on the first non-200. /readyz checks
+# DB + Redis + worker reachability inside the Pod, so a broken /readyz
+# is the brief's forcing-function trigger.
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: readyz-probe
+  namespace: ulys
+spec:
+  args:
+    - name: target-service
+  metrics:
+    - name: readyz
+      interval: 10s
+      count: 3
+      successCondition: result == "1"
+      failureLimit: 1
+      provider:
+        job:
+          spec:
+            backoffLimit: 0
+            template:
+              spec:
+                restartPolicy: Never
+                # PSS=restricted on ns/ulys requires every pod (including this
+                # ephemeral probe Job) to be non-root, drop ALL caps, set
+                # seccomp=RuntimeDefault, and disable privilege escalation.
+                # Without this the Job is rejected at admission and the
+                # canary aborts with a misleading "AnalysisRun Failed".
+                securityContext:
+                  runAsNonRoot: true
+                  runAsUser: 65532
+                  seccompProfile: { type: RuntimeDefault }
+                containers:
+                  - name: probe
+                    image: curlimages/curl:8.8.0
+                    command:
+                      - sh
+                      - -c
+                      - |
+                        code=$(curl -sk -o /dev/null -m 5 -w '%{http_code}' "http://{{args.target-service}}/readyz")
+                        echo "code=$code"
+                        [ "$code" = "200" ] && exit 0 || exit 1
+                    securityContext:
+                      allowPrivilegeEscalation: false
+                      readOnlyRootFilesystem: true
+                      capabilities: { drop: [ALL] }

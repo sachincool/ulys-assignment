@@ -1,0 +1,16 @@
+# Public-facing LoadBalancer pinned to the static external IP reserved
+# by Terraform (`api-lb`). The IP is stable across pod cycles so the
+# uptime check + the web bucket's API_URL substitution don't churn.
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-public
+  namespace: ulys
+spec:
+  type: LoadBalancer
+  loadBalancerIP: ${API_LB_STATIC_IP}
+  externalTrafficPolicy: Cluster
+  selector: { app: api }
+  ports:
+    - port: 80
+      targetPort: 8080
