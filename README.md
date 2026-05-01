@@ -102,6 +102,7 @@ The brief's `~$5–15/mo` target is a serverless target. On any GKE (Autopilot o
 | 🟢 ci-infra apply (idempotent + alerting wired) | **[ci-infra #25195034617](https://github.com/sachincool/ulys-assignment/actions/runs/25195034617)** — `terraform apply` 21s, 0 destroyed, 1 added (`google_monitoring_notification_channel.email`), 2 updated (alert policy + budget gain the channel). |
 | 🌐 Live api | **`http://34.68.6.121`** — `/livez /healthz /readyz /version /work`. `/version` returns `{"sha":"fed4b4e9b70a", "hostname":"api-78449985c7-..."}` |
 | 🌐 Live web | **<https://storage.googleapis.com/ulys-dev-72976-web/index.html>** — `${API_URL}` substituted to `http://34.68.6.121` by the `deploy-web` job |
+| 🧾 Billing | [`docs/screenshots/billing.png`](docs/screenshots/billing.png) — Cloud Billing report grouped by project, **₹102.69 total (~$1.23) across all assignment projects** for the dev window (Apr 27 – May 31, 2026). Spend is split across the spin-up/spin-down iterations done during development (each `just up` provisions a fresh project for blast-radius isolation). The current live project (`ulys-dev-72976`) is the most recent of those. The `down` recipe deletes the project, which stops accrual within ~24 h. |
 | 🖼️ Walk-through | [`docs/SETUP_DOCS.md`](docs/SETUP_DOCS.md) — single-repo Kustomize layout, GKE Autopilot, Workload Identity, GSM CSI file-mount, and the forcing-function recipe |
 
 ---
