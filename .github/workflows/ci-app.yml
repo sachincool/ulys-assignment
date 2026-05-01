@@ -23,6 +23,11 @@ env:
   REGISTRY: us-central1-docker.pkg.dev
   NAMESPACE: ulys
   TF_VERSION: "1.7.5"
+  # Opt the JS-based actions (checkout, setup-go, auth, setup-gcloud,
+  # setup-terraform, build-push-action) into Node 24 ahead of GitHub's
+  # forced default on 2026-06-02. Silences the "Node 20 deprecated"
+  # annotations on every job without chasing per-action version bumps.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
   test:
