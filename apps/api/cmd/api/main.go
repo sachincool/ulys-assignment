@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"log/slog"
@@ -83,6 +84,25 @@ func main() {
 	}
 	workerClient.Timeout = 5 * time.Second
 
+	// Optional: serve apps/web/index.html directly from the api at GET /
+	// so it's same-origin with /work — avoids the mixed-content block
+	// reviewers hit when loading the page from the HTTPS GCS bucket and
+	// fetching the HTTP api LB. Image lays the file at /web/index.html;
+	// override with INDEX_HTML for local dev.
+	indexPath := envOr("INDEX_HTML", "/web/index.html")
+	indexHTML, err := os.ReadFile(indexPath)
+	if err != nil {
+		logger.Info("index.html not present, GET / will 404", "path", indexPath, "err", err)
+	} else {
+		// Replace the literal placeholder with empty string. The page's JS
+		// is `const API_URL = "${API_URL}".startsWith("$") ? window.location.origin : "${API_URL}"`,
+		// so empty → falls through to window.location.origin → same-origin
+		// fetch. The original GCS-bucket flow keeps working too: the
+		// deploy-web job substitutes ${API_URL} to the LB IP before upload.
+		indexHTML = bytes.ReplaceAll(indexHTML, []byte("${API_URL}"), []byte(""))
+		logger.Info("serving index.html on GET /", "bytes", len(indexHTML))
+	}
+
 	srv := &server.Server{
 		DB:           pool,
 		Redis:        rdb,
@@ -91,6 +111,7 @@ func main() {
 		GitSHA:       gitSHA,
 		BuildTime:    buildTime,
 		Logger:       logger,
+		IndexHTML:    indexHTML,
 	}
 
 	r := chi.NewRouter()
@@ -100,6 +121,7 @@ func main() {
 	r.Use(slogRequestLogger(logger))
 	r.Use(corsAllowAll)
 
+	r.Get("/", srv.Web)
 	r.Get("/healthz", srv.Healthz)
 	r.Get("/livez", srv.Livez)
 	r.Get("/readyz", srv.Readyz)

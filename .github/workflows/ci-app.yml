@@ -89,7 +89,10 @@ jobs:
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
       - uses: docker/build-push-action@v5
         with:
-          context: apps/${{ matrix.service }}
+          # api needs apps/web/index.html in its build context (it ships
+          # the page so it can be served same-origin); worker doesn't.
+          context: ${{ matrix.service == 'api' && '.' || format('apps/{0}', matrix.service) }}
+          file:    apps/${{ matrix.service }}/Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.image }}
           cache-from: type=gha,scope=${{ matrix.service }}

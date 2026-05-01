@@ -69,8 +69,7 @@ pre-empts the questions a careful review would otherwise ask.
 | **Idle cost lands ~$135/mo, not the brief's $5–15.** | Autopilot's $73/mo cluster fee + Memorystore BASIC's $35/mo floor are unavoidable on this shape. See [Estimated monthly cost](#estimated-monthly-cost-us-central1-idle-dev) for the line-by-line. | $5–15 only fits a serverless shape (Cloud Run + auto-pause SQL + no Redis). `just down` returns to $0 in seconds. |
 | **`$20` budget alert fires day 1.** | Deliberate tripwire — proves the alert path works end-to-end on first stand-up. | Bump `var.budget_amount` to `15000` (~$150) for a non-tripping ceiling. |
 | **Canary blast radius is ~33–50% of traffic, not 10%.** | Argo Rollouts without a TrafficRouter splits by **pod count**; with `replicas: 2` and `setWeight: 10`, you get 1 canary pod = 1/3 of pods (during surge) ≈ kube-proxy RR. The brief's spirit (bounded blast radius, fast auto-rollback) is intact; the precise number is honest. | Add NGINX Ingress / Linkerd as the `trafficRouting` provider, or bump `replicas` to 10. Listed in [What's deferred](#whats-deferred-for-production). |
-| **Web → API hits HTTP from an HTTPS page → mixed-content block.** | GCS serves `https://`, the api LB is L4 `http://`. Modern browsers refuse the cross-scheme `fetch`. | Open the page from `http://storage.googleapis.com/...` (GCS serves both schemes), or open `apps/web/index.html` over `file://`. The prod upgrade — global HTTPS LB + custom domain + managed cert — dissolves this. |
-| **Cluster is zonal (`us-central1-a`).** | `var.zone` default. Same $73/mo control-plane fee as regional but single-AZ blast radius — appropriate for dev. | Flip `location = var.region` for regional HA in prod. Documented in [Architecture decisions](#architecture-decisions) and the prod-comparison table. |
+| **GCS bucket page can't call the HTTP api from HTTPS.** | `storage.googleapis.com` is HSTS-preloaded, so the page always loads over HTTPS, and browsers block the cross-scheme `fetch` to the HTTP api LB. | The api itself serves the same `index.html` at `GET /` on the LB IP — same-origin, no mixed-content. Reviewers click <http://34.68.6.121/>; the bucket version is kept around but deprecated. The prod upgrade — global HTTPS LB + Cloud Armor + managed cert on a custom domain — collapses both into one origin. |
 | **Dev master_authorized_networks is `0.0.0.0/0`.** | Take-home convenience so a reviewer can `kubectl` from anywhere. | Tightened to `<CI runner CIDR>` + bastion in prod ([prod-comparison table](#adding-a-production-environment-described-not-built)). |
 | **App is ~530 LOC, brief said <200.** | The brief's <200 is for the trivial handler code; the chi + pgx + redis + slog + graceful-shutdown + WI ID-token boilerplate is the other ~300 and pays for itself first SIGTERM. OTel SDK is gated on `OTEL_ENABLE=true` — no collector, so it costs zero runtime but adds LOC. | If LOC matters more than ergonomics, drop `apps/api/internal/telemetry` + the chi middleware (~60 LOC). |
 
@@ -100,8 +99,8 @@ The brief's `~$5–15/mo` target is a serverless target. On any GKE (Autopilot o
 | 🔴 Forcing-function rollback | **[ci-app #25194221144](https://github.com/sachincool/ulys-assignment/actions/runs/25194221144)** — `manifests/overlays/dev/kustomization.yaml` patched to redirect `DB_PASSWORD_FILE` at `/etc/hostname`; api boots, `/livez` 200, `/readyz` 503 (DB auth fails on the wrong-content "password"). Canary pod's readiness gate failed, so the Service excluded it from endpoints — **public traffic exposure to the broken revision: 0%** (smoke against the LB returned 200 for the entire 14-min window, all from the stable revision). `Watch Rollout` step exited 1 at the 10-min `kubectl argo rollouts status` timeout, deploy job marked failed, Rollout marked `Degraded — RolloutAborted`, canary RS scaled to 0. Auto-rollback signal: red CI + Rollout state, both visible. |
 | ✅ Green re-deploy after revert | **[ci-app #25194700814](https://github.com/sachincool/ulys-assignment/actions/runs/25194700814)** — `git revert` of the forcing-function commit. Clean canary walk in 4m7s, AnalysisRun `api-78449985c7-9-2 ✔ Successful`. Stable now: `api:fed4b4e9b70a`. |
 | 🟢 ci-infra apply (idempotent + alerting wired) | **[ci-infra #25195034617](https://github.com/sachincool/ulys-assignment/actions/runs/25195034617)** — `terraform apply` 21s, 0 destroyed, 1 added (`google_monitoring_notification_channel.email`), 2 updated (alert policy + budget gain the channel). |
-| 🌐 Live api | **`http://34.68.6.121`** — `/livez /healthz /readyz /version /work`. `/version` returns `{"sha":"fed4b4e9b70a", "hostname":"api-78449985c7-..."}` |
-| 🌐 Live web | **<https://storage.googleapis.com/ulys-dev-72976-web/index.html>** — `${API_URL}` substituted to `http://34.68.6.121` by the `deploy-web` job |
+| 🌐 Live api + web | **<http://34.68.6.121/>** — `/` serves the same-origin `index.html` (click "GET /work" to exercise the full path). Other endpoints: `/livez /healthz /readyz /version /work`. `/version` returns the deployed commit SHA + pod hostname. |
+| 🌐 Web (legacy GCS bucket) | <http://storage.googleapis.com/ulys-dev-72976-web/index.html> — same page, served from the bucket the `deploy-web` job uploads to. Browser-loaded over HTTPS this fails on mixed content (HTTPS page → HTTP api); the `/` route on the api LB above is the recommended viewer. |
 | 🧾 Billing | [`docs/screenshots/billing.png`](docs/screenshots/billing.png) — Cloud Billing report grouped by project, **₹102.69 total (~$1.23) across all assignment projects** for the dev window (Apr 27 – May 31, 2026). Spend is split across the spin-up/spin-down iterations done during development (each `just up` provisions a fresh project for blast-radius isolation). The current live project (`ulys-dev-72976`) is the most recent of those. The `down` recipe deletes the project, which stops accrual within ~24 h. |
 | 🖼️ Walk-through | [`docs/SETUP_DOCS.md`](docs/SETUP_DOCS.md) — single-repo Kustomize layout, GKE Autopilot, Workload Identity, GSM CSI file-mount, and the forcing-function recipe |
 
@@ -152,21 +151,31 @@ keys**. The deployer GSA has a curated role set with no Owner.
 
 ## Web → API communication
 
-`web` is one static `index.html` shipped to a public GCS bucket
-(`<PROJECT_ID>-web`). On click, it `fetch`es `${API_URL}/work`, where
-`API_URL` is replaced at deploy time by `ci-app.yml`'s `deploy-web` job
-with `http://<api_lb_static_ip>` (the static IP reserved by Terraform).
+The same `apps/web/index.html` is served two ways, both by the same
+push:
 
-> **Mixed-content caveat (dev only).** GCS bucket URLs serve over
-> `https://`, but `Service/api-public` is plain L4 `http://`. Modern
-> browsers block HTTPS pages from `fetch`ing HTTP origins. To exercise
-> the demo end-to-end, either (a) open the page from the bucket's
-> `http://storage.googleapis.com/...` endpoint (works because GCS
-> serves both schemes), or (b) clone the repo and open
-> `apps/web/index.html` over `file://` for local testing. The prod
-> upgrade — global HTTPS LB + custom domain + managed cert — lives in
-> [What's deferred](#whats-deferred-for-production) and dissolves this
-> caveat entirely.
+1. **Same-origin from the api itself** at `GET /` on the LB. The api
+   Dockerfile copies `apps/web/index.html` into the image; main.go
+   reads it once at startup and replaces the literal `${API_URL}`
+   placeholder with empty string, so the page's JS falls through to
+   `window.location.origin` and `fetch`es `/work` as a relative URL.
+   Reviewer browser → `http://<lb_ip>/` works end-to-end with no
+   mixed-content or CORS friction. **Use this URL for the demo.**
+2. **Static from a public GCS bucket** (`<PROJECT_ID>-web`), uploaded
+   by `ci-app.yml`'s `deploy-web` job. Same page, but here the job
+   substitutes `${API_URL}` with `http://<api_lb_static_ip>` so the
+   page knows where to call. Browser-loaded over HTTPS, modern
+   browsers block the cross-scheme `fetch` (`storage.googleapis.com`
+   is HSTS-preloaded so even `http://` URLs auto-upgrade). Kept in
+   the pipeline because the bucket pattern is the cheap CDN-able
+   shape that the README's prod upgrade extends; deprecated for the
+   demo path because the same-origin route at #1 is friction-free.
+
+The prod upgrade — global HTTPS LB + Cloud Armor + managed cert on a
+custom domain — replaces both: the page lives in the GCS bucket
+behind Cloud CDN, the api lives on the same domain at `/api/*`,
+same-origin without the api having to ship the HTML. Listed in
+[What's deferred](#whats-deferred-for-production).
 
 Why this pattern:
 

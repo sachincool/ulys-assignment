@@ -23,6 +23,13 @@ type Server struct {
 	GitSHA       string
 	BuildTime    string
 	Logger       *slog.Logger
+
+	// IndexHTML is the bytes of apps/web/index.html with the literal
+	// ${API_URL} placeholder replaced by empty string at startup, so the
+	// JS in the page falls through to window.location.origin and does
+	// same-origin fetches. Nil if the file wasn't present in the image
+	// (the handler then 404s cleanly).
+	IndexHTML []byte
 }
 
 func (s *Server) Healthz(w http.ResponseWriter, _ *http.Request) {
@@ -51,6 +58,19 @@ func (s *Server) Readyz(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, _ = w.Write([]byte("ready"))
+}
+
+// Web serves the cached index.html. Mounted at GET / so the page is
+// same-origin with the api — sidesteps the mixed-content block that the
+// HTTPS GCS bucket version triggered (HTTPS page can't fetch HTTP api).
+func (s *Server) Web(w http.ResponseWriter, _ *http.Request) {
+	if s.IndexHTML == nil {
+		http.NotFound(w, nil)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=60")
+	_, _ = w.Write(s.IndexHTML)
 }
 
 func (s *Server) Version(w http.ResponseWriter, _ *http.Request) {
