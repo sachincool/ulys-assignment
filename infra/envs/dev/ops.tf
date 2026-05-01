@@ -70,7 +70,14 @@ resource "google_billing_budget" "dev" {
   display_name    = "ulys-dev budget"
 
   budget_filter {
+    # Cloud Billing API normalizes "projects/<id>" to "projects/<number>" on
+    # read, so terraform refresh always sees a synthetic diff. Both forms
+    # refer to the same project; ignore_changes pins the diff out.
     projects = ["projects/${var.project}"]
+  }
+
+  lifecycle {
+    ignore_changes = [budget_filter[0].projects]
   }
 
   amount {
