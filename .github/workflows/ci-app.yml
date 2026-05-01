@@ -37,7 +37,10 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.22"
+          # setup-go@v6 sets GOTOOLCHAIN=local, so the runner's Go must
+          # already match what go.mod requires. Read the version from
+          # go.mod itself (currently 1.25) to keep a single source of truth.
+          go-version-file: apps/${{ matrix.service }}/go.mod
           cache-dependency-path: apps/${{ matrix.service }}/go.sum
       - run: go vet ./...
       - run: go test -race ./...
