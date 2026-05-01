@@ -90,7 +90,7 @@ jobs:
           IMAGE="${{ env.REGISTRY }}/${{ vars.GCP_PROJECT_ID_DEV }}/ulys/${{ matrix.service }}:$SHA"
           echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v7
         with:
           # api needs apps/web/index.html in its build context (it ships
           # the page so it can be served same-origin); worker doesn't.
