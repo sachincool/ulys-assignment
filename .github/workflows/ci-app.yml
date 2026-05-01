@@ -23,11 +23,6 @@ env:
   REGISTRY: us-central1-docker.pkg.dev
   NAMESPACE: ulys
   TF_VERSION: "1.7.5"
-  # Opt the JS-based actions (checkout, setup-go, auth, setup-gcloud,
-  # setup-terraform, build-push-action) into Node 24 ahead of GitHub's
-  # forced default on 2026-06-02. Silences the "Node 20 deprecated"
-  # annotations on every job without chasing per-action version bumps.
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
   test:
@@ -39,8 +34,8 @@ jobs:
       run:
         working-directory: apps/${{ matrix.service }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: "1.22"
           cache-dependency-path: apps/${{ matrix.service }}/go.sum
@@ -50,7 +45,7 @@ jobs:
   manifests-lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: kustomize build + yaml parse
         # kubectl --dry-run=client still does cluster API discovery in
         # 1.35+, so it's useless without a cluster. `kustomize build`
@@ -78,21 +73,21 @@ jobs:
       worker-image: ${{ steps.collect.outputs.worker }}
       sha: ${{ steps.meta.outputs.sha }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: google-github-actions/auth@v2
+      - uses: actions/checkout@v5
+      - uses: google-github-actions/auth@v3
         with:
           workload_identity_provider: ${{ vars.WIF_PROVIDER_DEV }}
           service_account: ${{ vars.DEPLOYER_SA_DEV }}
-      - uses: google-github-actions/setup-gcloud@v2
+      - uses: google-github-actions/setup-gcloud@v3
       - run: gcloud auth configure-docker ${{ env.REGISTRY }} --quiet
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
       - id: meta
         run: |
           SHA="${GITHUB_SHA::12}"
           IMAGE="${{ env.REGISTRY }}/${{ vars.GCP_PROJECT_ID_DEV }}/ulys/${{ matrix.service }}:$SHA"
           echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
-      - uses: docker/build-push-action@v5
+      - uses: docker/build-push-action@v6
         with:
           # api needs apps/web/index.html in its build context (it ships
           # the page so it can be served same-origin); worker doesn't.
@@ -123,18 +118,18 @@ jobs:
     environment: dev
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: google-github-actions/auth@v2
+      - uses: google-github-actions/auth@v3
         with:
           workload_identity_provider: ${{ vars.WIF_PROVIDER_DEV }}
           service_account: ${{ vars.DEPLOYER_SA_DEV }}
 
-      - uses: google-github-actions/setup-gcloud@v2
+      - uses: google-github-actions/setup-gcloud@v3
         with:
           install_components: gke-gcloud-auth-plugin
 
-      - uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@v4
         with:
           terraform_version: ${{ env.TF_VERSION }}
 
@@ -240,13 +235,13 @@ jobs:
     runs-on: ubuntu-latest
     environment: dev
     steps:
-      - uses: actions/checkout@v4
-      - uses: google-github-actions/auth@v2
+      - uses: actions/checkout@v5
+      - uses: google-github-actions/auth@v3
         with:
           workload_identity_provider: ${{ vars.WIF_PROVIDER_DEV }}
           service_account: ${{ vars.DEPLOYER_SA_DEV }}
-      - uses: google-github-actions/setup-gcloud@v2
-      - uses: hashicorp/setup-terraform@v3
+      - uses: google-github-actions/setup-gcloud@v3
+      - uses: hashicorp/setup-terraform@v4
         with:
           terraform_version: ${{ env.TF_VERSION }}
       - name: Read api LB static IP
